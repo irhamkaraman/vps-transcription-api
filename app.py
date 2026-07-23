@@ -5,9 +5,18 @@ import json
 import asyncio
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 print("⏳ Memuat model Whisper ke memori...", flush=True)
 # Menggunakan compute_type int8 untuk menghemat RAM dan thread cpu secukupnya
