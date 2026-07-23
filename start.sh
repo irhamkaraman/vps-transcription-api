@@ -1,5 +1,5 @@
 #!/bin/bash
-PORT=80
+PORT=8000
 echo "🚀 Memulai server transkripsi di port $PORT..."
 
 # Aktifkan virtual environment
