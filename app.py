@@ -7,7 +7,7 @@ app = FastAPI(title="Whisper Offline Transcription API")
 
 # Load model ke memori RAM saat server menyala
 print("⏳ Memuat model Whisper ke memori...")
-model = whisper.load_model("base")
+model = whisper.load_model("large-v3")
 print("✅ Model siap menerima request!")
 
 UPLOAD_DIR = "storage/temp"
