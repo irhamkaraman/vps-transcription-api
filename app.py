@@ -31,25 +31,29 @@ async def transcribe_audio(file: UploadFile = File(...)):
 
     async def generate_transcription():
       try:
-        # VAD & Inisialisasi awal transkripsi
-        segments, info = await asyncio.to_thread(
-            model.transcribe, temp_file_path, beam_size=5
-        )
+        yield json.dumps({"status": "processing", "start": 0, "end": 0, "text": "<i>Memulai analisa suara... (CPU VPS sedang bekerja ekstra keras, harap tunggu)</i>"}) + "\n"
+        task = asyncio.create_task(asyncio.to_thread(model.transcribe, temp_file_path, beam_size=5))
+        while not task.done():
+            yield json.dumps({"status": "ping"}) + "\n"
+            await asyncio.sleep(10)
         
+        segments, info = task.result()
         print(f"🌍 Terdeteksi bahasa: {info.language} dengan probabilitas {info.language_probability}", flush=True)
         
         iterator = iter(segments)
         while True:
-            # Mengambil segmen teks satu per satu di thread terpisah agar tidak block event loop
+            next_task = asyncio.create_task(asyncio.to_thread(next, iterator))
+            while not next_task.done():
+                yield json.dumps({"status": "ping"}) + "\n"
+                await asyncio.sleep(10)
+                
             try:
-                segment = await asyncio.to_thread(next, iterator)
+                segment = next_task.result()
             except StopIteration:
                 break
                 
-            # Cetak ke server.log secara real-time
             print(f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}", flush=True)
             
-            # Kirim data ke client (Postman/cPanel) secara streaming sebagai NDJSON / Chunked JSON
             yield json.dumps({
                 "status": "processing",
                 "start": segment.start,
