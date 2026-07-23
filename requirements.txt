@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 python-multipart
-openai-whisper
+faster-whisper
 torch
 numpy<2.0.0
