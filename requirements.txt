@@ -3,3 +3,4 @@ uvicorn
 python-multipart
 openai-whisper
 torch
+numpy<2.0.0

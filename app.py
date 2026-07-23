@@ -18,12 +18,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 async def transcribe_audio(file: UploadFile = File(...)):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     try:
-        # 1. Simpan file audio kiriman dari cPanel ke VPS
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # 2. Proses transkripsi menggunakan Whisper
-        print(f"🎙️ Memproses transkripsi untuk: {file.filename}")
+        print(f"Memproses transkripsi untuk: {file.filename}")
         result = model.transcribe(file_path)
 
         return {
@@ -37,7 +35,6 @@ async def transcribe_audio(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # 3. Wajib: Hapus file audio setelah selesai agar hardisk VPS tidak penuh
         if os.path.exists(file_path):
             os.remove(file_path)
 

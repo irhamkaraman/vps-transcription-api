@@ -1,6 +1,6 @@
 import whisper
 
-print("⏳ Mulai mengunduh model Whisper (base)...")
+print("[Start] Mulai mengunduh model Whisper (base)...")
 
-model = whisper.load_model("base")
-print("✅ Model berhasil diunduh dan siap digunakan!")
+model = whisper.load_model("large-v3")
+print("[Complete] Model berhasil diunduh dan siap digunakan!")
