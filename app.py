@@ -191,11 +191,15 @@ def process_transcription_background(
         log_progress(f"Transkripsi selesai! Total {segment_count} segmen. Mengirim webhook...", elapsed_total())
 
         import requests
+        import urllib3
+        urllib3.disable_warnings()  # Suppress SSL warning logs
+
         try:
             response = requests.post(
                 callback_url,
                 json={"transcription": final_transcription},
-                timeout=30
+                timeout=30,
+                verify=False  # ⚠️ Nonaktifkan SSL verify karena cert cPanel tidak cocok dengan hostname
             )
             response.raise_for_status()
             log_progress(f"✅ Webhook BERHASIL terkirim ke Laravel! (HTTP {response.status_code})", elapsed_total())
@@ -211,11 +215,14 @@ def process_transcription_background(
         elapsed_total = time.time() - start_time
         log_progress(f"❌ ERROR FATAL: {str(e)}", elapsed_total(), "ERROR")
         import requests
+        import urllib3
+        urllib3.disable_warnings()
         try:
             requests.post(
                 callback_url,
                 json={"transcription": [], "error": str(e)},
-                timeout=10
+                timeout=10,
+                verify=False  # Nonaktifkan SSL verify (sama seperti webhook sukses)
             )
             log_progress(f"Webhook error berhasil dikirim", elapsed_total())
         except:
