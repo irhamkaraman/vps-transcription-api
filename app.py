@@ -23,10 +23,6 @@ app.add_middleware(
 # ============================================
 # KONFIGURASI MODEL — Baca dari environment variable
 # ============================================
-# Cara ganti model: set WHISPER_MODEL=medium di environment
-# Model yang tersedia: tiny, base, small, medium, large, large-v2, large-v3
-# Rekomendasi untuk CPU: base (cepat) atau medium (akurat tapi lebih lambat)
-
 MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
 DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
@@ -34,7 +30,7 @@ CPU_THREADS = 4
 BEAM_SIZE = 1
 VAD_FILTER = True
 WORD_TIMESTAMPS = False
-CHUNK_LENGTH = 30  # proses audio per 30 detik (lebih responsif)
+CHUNK_LENGTH = 30
 
 # Mapping bahasa Laravel → Whisper
 LANG_MAP = {
@@ -45,13 +41,13 @@ LANG_MAP = {
 
 # Informasi model untuk logging
 MODEL_INFO = {
-    "tiny":   "Tiny   (39 MB) — Paling cepat, akurasi rendah",
-    "base":   "Base   (74 MB) — Cepat, akurasi sedang (REKOMENDASI)",
-    "small":  "Small  (244 MB) — Sedang cepat, akurasi cukup",
-    "medium": "Medium (769 MB) — Lambat di CPU, akurasi tinggi",
-    "large":  "Large  (1.5 GB) — Sangat lambat di CPU, akurasi sangat tinggi",
-    "large-v2": "Large-v2 (1.5 GB) — Lambat, akurasi sangat tinggi",
-    "large-v3": "Large-v3 (1.5 GB) — Lambat, akurasi sangat tinggi",
+    "tiny":   "Tiny (39 MB) — Paling cepat",
+    "base":   "Base (74 MB) — Cepat (REKOMENDASI)",
+    "small":  "Small (244 MB) — Sedang",
+    "medium": "Medium (769 MB) — Akurat",
+    "large":  "Large (1.5 GB)",
+    "large-v2": "Large-v2 (1.5 GB)",
+    "large-v3": "Large-v3 (1.5 GB)",
 }
 
 
