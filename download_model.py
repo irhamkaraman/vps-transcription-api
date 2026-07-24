@@ -1,6 +1,6 @@
-import whisper
+from faster_whisper import WhisperModel
 
-print("[Start] Mulai mengunduh model Whisper (base)...")
+print("[Start] Mulai mengunduh model Whisper (medium)...")
 
-model = whisper.load_model("large-v3")
+model = WhisperModel("medium", device="cpu", compute_type="int8")
 print("[Complete] Model berhasil diunduh dan siap digunakan!")

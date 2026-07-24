@@ -19,8 +19,8 @@ app.add_middleware(
 )
 
 print("⏳ Memuat model Whisper ke memori...", flush=True)
-# Menggunakan compute_type int8 untuk menghemat RAM dan thread cpu secukupnya
-model = WhisperModel("large-v3", device="cpu", compute_type="int8", cpu_threads=2)
+# Menggunakan compute_type int8 dan model 'small' atau 'medium' agar cepat di CPU 4-Core
+model = WhisperModel("medium", device="cpu", compute_type="int8", cpu_threads=4)
 print("✅ Model siap menerima request!", flush=True)
 
 
