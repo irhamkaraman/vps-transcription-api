@@ -56,12 +56,16 @@ async def transcribe_audio(
     )
 
 def process_transcription_background(temp_file_path: str, callback_url: str):
+    import requests
+    import time
     try:
         print("⏳ Mulai proses pembedahan audio oleh Whisper di background...", flush=True)
         segments, info = model.transcribe(temp_file_path, beam_size=5)
         print(f"🌍 Terdeteksi bahasa: {info.language} dengan probabilitas {info.language_probability}", flush=True)
         
         final_transcription = []
+        last_webhook_time = 0
+        
         for segment in segments:
             print(f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}", flush=True)
             
@@ -80,16 +84,24 @@ def process_transcription_background(temp_file_path: str, callback_url: str):
                 "timestamp": f"{start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d}"
             })
             
-        print("✅ Transkripsi selesai! Mengirim hasil ke Laravel (Webhook)...", flush=True)
+            # Throttling webhook: kirim webhook maksimal tiap 2 detik
+            current_time = time.time()
+            if current_time - last_webhook_time > 2.0:
+                try:
+                    requests.post(callback_url, json={"status": "progress", "transcription": final_transcription}, timeout=5)
+                    last_webhook_time = current_time
+                except Exception as http_err:
+                    print(f"⚠️ Gagal mengirim webhook progres: {http_err}", flush=True)
+            
+        print("✅ Transkripsi selesai! Mengirim hasil akhir ke Laravel (Webhook)...", flush=True)
         
-        # Kirim hasil via HTTP POST (Webhook)
-        import requests
+        # Kirim hasil akhir (status: completed)
         try:
-            response = requests.post(callback_url, json={"transcription": final_transcription}, timeout=30)
+            response = requests.post(callback_url, json={"status": "completed", "transcription": final_transcription}, timeout=30)
             response.raise_for_status()
-            print("🚀 Webhook berhasil terkirim ke Laravel!", flush=True)
+            print("🚀 Webhook completed berhasil terkirim ke Laravel!", flush=True)
         except Exception as http_err:
-            print(f"⚠️ Gagal mengirim webhook ke Laravel: {http_err}", flush=True)
+            print(f"⚠️ Gagal mengirim webhook completed ke Laravel: {http_err}", flush=True)
             
     except Exception as e:
         print(f"❌ Terjadi kesalahan saat proses background: {str(e)}", flush=True)
