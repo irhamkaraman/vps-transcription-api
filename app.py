@@ -72,20 +72,6 @@ def log(msg: str):
 
 
 # ============================================
-# PROGRESS CALLBACK — Dipanggil selama transkripsi berjalan
-# ============================================
-def whisper_progress_callback(progress: float, text: str):
-    """
-    Dipanggil oleh faster-whisper selama model bekerja.
-    progress: float 0-100 (persentase penyelesaian)
-    text: preview teks yang sedang diproses
-    """
-    progress_state["percentage"] = round(progress)
-    progress_state["active"] = True
-    log(f"🔄 PROGRESS: {progress:.1f}% | Preview: {text[:50]}...")
-
-
-# ============================================
 # WEBSOCKET ALTERNATIVE: Kirim progress ke cPanel
 # ============================================
 def send_progress_webhook(progress_pct: int, segment_count: int, callback_url: str):
@@ -225,7 +211,7 @@ def process_transcription_background(
         log(f"   Chunk: {CHUNK_LENGTH}s")
         log(f"   Mulai: {time.strftime('%H:%M:%S')}\n")
 
-        # === TRANSKRIPSI DENGAN PROGRESS CALLBACK ===
+        # === TRANSKRIPSI (tanpa progress_callback karena tidak didukung) ===
         segments, info = model.transcribe(
             temp_file_path,
             language=whisper_lang,
@@ -233,7 +219,6 @@ def process_transcription_background(
             vad_filter=VAD_FILTER,
             word_timestamps=WORD_TIMESTAMPS,
             chunk_length=CHUNK_LENGTH,
-            progress_callback=whisper_progress_callback  # ← PROGRESS REALTIME
         )
 
         # === PROSES SEGMENTS ===
