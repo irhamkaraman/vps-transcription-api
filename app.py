@@ -56,6 +56,17 @@ MODEL_INFO = {
 
 
 # ============================================
+# KONFIGURASI CALLBACK — URL Laravel cPanel untuk menerima webhook
+# ============================================
+# Jika VPS dan cPanel di server yang SAMA, gunakan localhost
+# Jika BERBEDA server, gunakan IP/domain eksternal
+CALLBACK_BASE_URL = os.getenv("CALLBACK_BASE_URL", "https://temaniskripsi.id")
+
+# ============================================
+# KONFIGURASI MODEL — Baca dari environment variable
+# ============================================
+
+# ============================================
 # GLOBAL — Progress tracking thread-safe
 # ============================================
 progress_state = {
