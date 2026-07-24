@@ -302,6 +302,11 @@ def process_transcription_background(
         # === PROSES SEGMENTS ===
         final_transcription = []
         segment_count = 0
+        last_webhook_time = time.time()
+        
+        # Total durasi audio untuk menghitung persentase secara real-time
+        # Jika info.duration tidak akurat, kita estimasi saja dari start segment
+        total_duration = getattr(info, 'duration', 0)
 
         for i, segment in enumerate(segments, 1):
             segment_count += 1
@@ -320,6 +325,22 @@ def process_transcription_background(
             # Log setiap segmen
             preview = segment.text.strip()[:80]
             log(f"   Segmen #{i:03d}: [{int(segment.start)//60:02d}:{int(segment.start)%60:02d}] {preview}")
+            
+            # Update persentase (mulai dari 60% menuju 80%)
+            current_time = time.time()
+            if current_time - last_webhook_time > 3.0:
+                current_percent = 60
+                if total_duration > 0:
+                    current_percent = 60 + min(19, int((segment.end / total_duration) * 20))
+                
+                send_webhook(callback_url, {
+                    "status": "progress",
+                    "progress": current_percent,
+                    "message": f"Menganalisis audio... ({int(segment.start)//60:02d}:{int(segment.start)%60:02d})",
+                    "transcription": final_transcription,
+                    "logs": list(progress_state["logs"])
+                })
+                last_webhook_time = current_time
 
         # === Kirim progress: 80% - Segmen selesai ===
         progress_state["total_segments"] = segment_count
