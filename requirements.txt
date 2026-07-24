@@ -4,3 +4,4 @@ python-multipart
 faster-whisper
 torch
 numpy<2.0.0
+requests

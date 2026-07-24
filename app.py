@@ -3,7 +3,7 @@ import shutil
 import tempfile
 import json
 import asyncio
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
@@ -25,8 +25,13 @@ print("✅ Model siap menerima request!", flush=True)
 
 
 @app.post("/api/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    callback_url: str = Form(...)
+):
   print(f"📥 Menerima file: {file.filename}", flush=True)
+  print(f"🔗 Callback URL: {callback_url}", flush=True)
 
   temp_file_path = None
   try:
@@ -36,54 +41,11 @@ async def transcribe_audio(file: UploadFile = File(...)):
       temp_file_path = temp_file.name
 
     print(f"⚙️ File disimpan sementara di: {temp_file_path}", flush=True)
-    print("⏳ Mulai proses pembedahan audio oleh Whisper...", flush=True)
+    
+    # Jalankan proses transkripsi di background
+    background_tasks.add_task(process_transcription_background, temp_file_path, callback_url)
 
-    async def generate_transcription():
-      try:
-        yield json.dumps({"status": "processing", "start": 0, "end": 0, "text": "<i>Memulai analisa suara... (CPU VPS sedang bekerja ekstra keras, harap tunggu)</i>"}) + "\n"
-        task = asyncio.create_task(asyncio.to_thread(model.transcribe, temp_file_path, beam_size=5))
-        while not task.done():
-            yield json.dumps({"status": "ping"}) + "\n"
-            await asyncio.sleep(10)
-        
-        segments, info = task.result()
-        print(f"🌍 Terdeteksi bahasa: {info.language} dengan probabilitas {info.language_probability}", flush=True)
-        
-        iterator = iter(segments)
-        while True:
-            next_task = asyncio.create_task(asyncio.to_thread(next, iterator))
-            while not next_task.done():
-                yield json.dumps({"status": "ping"}) + "\n"
-                await asyncio.sleep(10)
-                
-            try:
-                segment = next_task.result()
-            except StopIteration:
-                break
-                
-            print(f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}", flush=True)
-            
-            yield json.dumps({
-                "status": "processing",
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text
-            }) + "\n"
-
-        print("✅ Transkripsi selesai!", flush=True)
-        yield json.dumps({"status": "success", "message": "Transkripsi selesai"}) + "\n"
-
-      except Exception as e:
-        print(f"❌ Terjadi kesalahan saat streaming transkripsi: {str(e)}", flush=True)
-        yield json.dumps({"status": "error", "message": str(e)}) + "\n"
-        
-      finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-          os.remove(temp_file_path)
-          print("🧹 File sementara berhasil dibersihkan.", flush=True)
-
-    # Mengembalikan StreamingResponse dengan mimetype x-ndjson (Newline Delimited JSON)
-    return StreamingResponse(generate_transcription(), media_type="application/x-ndjson")
+    return {"status": "queued", "message": "File diterima dan sedang diproses di background."}
 
   except Exception as e:
     if temp_file_path and os.path.exists(temp_file_path):
@@ -92,3 +54,53 @@ async def transcribe_audio(file: UploadFile = File(...)):
     raise HTTPException(
         status_code=500, detail=f"Internal Server Error: {str(e)}"
     )
+
+def process_transcription_background(temp_file_path: str, callback_url: str):
+    try:
+        print("⏳ Mulai proses pembedahan audio oleh Whisper di background...", flush=True)
+        segments, info = model.transcribe(temp_file_path, beam_size=5)
+        print(f"🌍 Terdeteksi bahasa: {info.language} dengan probabilitas {info.language_probability}", flush=True)
+        
+        final_transcription = []
+        for segment in segments:
+            print(f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}", flush=True)
+            
+            # Format sesuai kebutuhan database Laravel
+            start_min = int(segment.start // 60)
+            start_sec = int(segment.start % 60)
+            end_min = int(segment.end // 60)
+            end_sec = int(segment.end % 60)
+            
+            # Escape HTML simple
+            esc_text = segment.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            
+            final_transcription.append({
+                "text_html": esc_text,
+                "speaker": "Unknown",
+                "timestamp": f"{start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d}"
+            })
+            
+        print("✅ Transkripsi selesai! Mengirim hasil ke Laravel (Webhook)...", flush=True)
+        
+        # Kirim hasil via HTTP POST (Webhook)
+        import requests
+        try:
+            response = requests.post(callback_url, json={"transcription": final_transcription}, timeout=30)
+            response.raise_for_status()
+            print("🚀 Webhook berhasil terkirim ke Laravel!", flush=True)
+        except Exception as http_err:
+            print(f"⚠️ Gagal mengirim webhook ke Laravel: {http_err}", flush=True)
+            
+    except Exception as e:
+        print(f"❌ Terjadi kesalahan saat proses background: {str(e)}", flush=True)
+        import requests
+        try:
+            # Kirim webhook kosong/error agar Laravel tahu proses gagal
+            requests.post(callback_url, json={"transcription": [], "error": str(e)}, timeout=10)
+        except:
+            pass
+            
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            print("🧹 File sementara berhasil dibersihkan.", flush=True)
