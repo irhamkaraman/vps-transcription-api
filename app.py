@@ -99,6 +99,12 @@ def send_webhook(callback_url: str, payload: dict, timeout: int = 15):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
         }
+        
+        # BYPASS DNS: Jika VPS mengira temaniskripsi.id adalah localhost (127.0.0.1)
+        if "temaniskripsi.id" in callback_url:
+            callback_url = callback_url.replace("temaniskripsi.id", "103.180.164.146")
+            headers["Host"] = "temaniskripsi.id"
+
         response = requests.post(
             callback_url,
             json=payload,
@@ -340,6 +346,11 @@ def process_transcription_background(
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
         }
+        
+        if "temaniskripsi.id" in callback_url:
+            callback_url = callback_url.replace("temaniskripsi.id", "103.180.164.146")
+            headers["Host"] = "temaniskripsi.id"
+            
         response = requests.post(
             callback_url,
             json={
