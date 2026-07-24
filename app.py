@@ -95,10 +95,15 @@ def send_webhook(callback_url: str, payload: dict, timeout: int = 15):
     import urllib3
     urllib3.disable_warnings()
     try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
         response = requests.post(
             callback_url,
             json=payload,
             timeout=timeout,
+            headers=headers,
             verify=False
         )
         response.raise_for_status()
@@ -331,6 +336,10 @@ def process_transcription_background(
         total_elapsed = time.time() - start_time
         progress_state["total_duration_sec"] = round(total_elapsed, 1)
 
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
         response = requests.post(
             callback_url,
             json={
@@ -341,7 +350,8 @@ def process_transcription_background(
                 "total_segments": segment_count,
                 "total_duration_sec": round(total_elapsed, 1)
             },
-            timeout=30,
+            timeout=120,
+            headers=headers,
             verify=False
         )
         response.raise_for_status()
@@ -353,6 +363,10 @@ def process_transcription_background(
         log(f"\n❌ ERROR FATAL setelah {elapsed:.1f}s: {e}")
         progress_state["error"] = str(e)
         progress_state["percentage"] = 0
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
         send_webhook(callback_url, {
             "transcription": [],
             "error": str(e),
