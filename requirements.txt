@@ -5,3 +5,12 @@ faster-whisper
 torch
 numpy<2.0.0
 requests
+pydantic
+# ============================================
+# PENTING: Install FFmpeg di VPS
+# ============================================
+# Di Ubuntu/Debian:
+#   sudo apt-get install -y ffmpeg
+# Di CentOS/RHEL:
+#   sudo yum install -y ffmpeg
+# ============================================
