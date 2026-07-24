@@ -2,10 +2,9 @@ import os
 import shutil
 import tempfile
 import json
-import asyncio
 import time
+import threading
 from fastapi import FastAPI, File, HTTPException, UploadFile, Form, BackgroundTasks
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 
@@ -20,23 +19,41 @@ app.add_middleware(
 )
 
 # ============================================
-# KONFIGURASI MODEL — Edit di sini jika perlu
+# KONFIGURASI MODEL — Optimal untuk 4-core CPU
 # ============================================
-MODEL_NAME = "medium"          # "large-v3" | "medium" | "small"
+MODEL_NAME = "medium"
 DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
-CPU_THREADS = 4               # PAKAI SEMUA CORE (server kamu 4 core)
-BEAM_SIZE = 1                 # 1 = paling cepat, 3-5 = lebih akurat tapi lambat
-VAD_FILTER = True             # SKIP DRAU, jauh lebih cepat!
-WORD_TIMESTAMPS = False       # FALSE = lebih cepat (tidak perlu timestamp per kata)
+CPU_THREADS = 4
+BEAM_SIZE = 1
+VAD_FILTER = True
+WORD_TIMESTAMPS = False
+CHUNK_LENGTH = 30  # proses audio per 30 detik (lebih responsif)
 
-# Mapping kode bahasa Laravel → kode Whisper
+# Mapping bahasa Laravel → Whisper
 LANG_MAP = {
-    "id": "id",   # Indonesia
-    "en": "en",   # English
-    "zh": "zh",   # Chinese
+    "id": "id",
+    "en": "en",
+    "zh": "zh",
 }
 
+# ============================================
+# GLOBAL — Progress tracking thread-safe
+# ============================================
+progress_state = {
+    "active": False,
+    "percentage": 0,
+    "current_segment": 0,
+    "total_segments": 0,
+    "callback_url": "",
+    "transcription": [],
+    "error": None,
+}
+
+
+# ============================================
+# LOAD MODEL
+# ============================================
 print(f"⏳ Memuat model Whisper [{MODEL_NAME}] ke memori...", flush=True)
 t0 = time.time()
 model = WhisperModel(
@@ -45,36 +62,103 @@ model = WhisperModel(
     compute_type=COMPUTE_TYPE,
     cpu_threads=CPU_THREADS
 )
-print(f"✅ Model [{MODEL_NAME}] siap menerima request! ({time.time()-t0:.1f}s)", flush=True)
+print(f"✅ Model [{MODEL_NAME}] siap! ({time.time()-t0:.1f}s)", flush=True)
 
 
-def format_duration(ms: float) -> str:
-    """Format milidetik menjadi HH:MM:SS,mmm"""
-    total = ms / 1000
-    h = int(total // 3600)
-    m = int((total % 3600) // 60)
-    s = total % 60
-    return f"{h:02d}:{m:02d}:{s:05.2f}"
+def log(msg: str):
+    """Logging dengan timestamp"""
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 
-def log_progress(msg: str, elapsed: float, level: str = "INFO"):
-    """Logging terstandar: [LEVEL] [elapsed] pesan"""
-    ts = format_duration(elapsed)
-    print(f"[{level}] ⏱️ {ts} — {msg}", flush=True)
+# ============================================
+# PROGRESS CALLBACK — Dipanggil selama transkripsi berjalan
+# ============================================
+def whisper_progress_callback(progress: float, text: str):
+    """
+    Dipanggil oleh faster-whisper selama model bekerja.
+    progress: float 0-100 (persentase penyelesaian)
+    text: preview teks yang sedang diproses
+    """
+    progress_state["percentage"] = round(progress)
+    progress_state["active"] = True
+    log(f"🔄 PROGRESS: {progress:.1f}% | Preview: {text[:50]}...")
 
 
+# ============================================
+# WEBSOCKET ALTERNATIVE: Kirim progress ke cPanel
+# ============================================
+def send_progress_webhook(progress_pct: int, segment_count: int, callback_url: str):
+    """Kirim progress ke cPanel tanpa memperlambat transkripsi"""
+    import requests
+    import urllib3
+    urllib3.disable_warnings()
+
+    try:
+        # Kirim progress saja, jangan tunggu response lama
+        requests.post(
+            callback_url,
+            json={
+                "status": "progress",
+                "progress": progress_pct,
+                "segments_processed": segment_count
+            },
+            timeout=10,
+            verify=False
+        )
+        log(f"📡 Progress {progress_pct}% terkirim ke cPanel")
+    except Exception as e:
+        log(f"⚠️ Gagal kirim progress: {e}")
+
+
+# ============================================
+# PROGRESS MONITOR THREAD — Kirim update ke cPanel setiap N detik
+# ============================================
+def progress_monitor_thread(callback_url: str, check_interval: int = 5):
+    """Thread terpisah yang memantau progress dan mengirim ke cPanel"""
+    import requests
+    import urllib3
+    urllib3.disable_warnings()
+
+    last_sent = 0
+    milestone_sent = set()
+
+    while progress_state["active"]:
+        time.sleep(check_interval)
+
+        current_pct = progress_state["percentage"]
+        current_seg = progress_state["current_segment"]
+
+        # Log heartbeat setiap check_interval detik
+        log(f"💓 Heartbeat: {current_pct}% | Segmen: {current_seg} | Status: RUNNING")
+
+        # Kirim milestone progress (25%, 50%, 75%) agar tidak spam
+        if current_pct >= 25 and 25 not in milestone_sent:
+            milestone_sent.add(25)
+            send_progress_webhook(25, current_seg, callback_url)
+        elif current_pct >= 50 and 50 not in milestone_sent:
+            milestone_sent.add(50)
+            send_progress_webhook(50, current_seg, callback_url)
+        elif current_pct >= 75 and 75 not in milestone_sent:
+            milestone_sent.add(75)
+            send_progress_webhook(75, current_seg, callback_url)
+
+
+# ============================================
+# API ENDPOINT
+# ============================================
 @app.post("/api/transcribe")
 async def transcribe_audio(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     callback_url: str = Form(...),
-    language: str = Form("auto"),   # <-- BARU: terima parameter bahasa dari Laravel
+    language: str = Form("id"),  # default Indonesia
 ):
-    print(f"\n{'='*55}", flush=True)
-    print(f"📥 Menerima file: {file.filename}", flush=True)
-    print(f"🔗 Callback URL: {callback_url}", flush=True)
-    print(f"🌐 Bahasa target: {language}", flush=True)
-    print(f"{'='*55}\n", flush=True)
+    log(f"\n{'='*50}")
+    log(f"📥 File: {file.filename}")
+    log(f"🔗 Callback: {callback_url}")
+    log(f"🌐 Bahasa: {language}")
+    log(f"{'='*50}")
 
     temp_file_path = None
     try:
@@ -83,9 +167,8 @@ async def transcribe_audio(
             shutil.copyfileobj(file.file, temp_file)
             temp_file_path = temp_file.name
 
-        print(f"⚙️ File disimpan sementara di: {temp_file_path}", flush=True)
+        log(f"⚙️ Temp file: {temp_file_path}")
 
-        # Jalankan proses transkripsi di background
         background_tasks.add_task(
             process_transcription_background,
             temp_file_path,
@@ -93,78 +176,77 @@ async def transcribe_audio(
             language
         )
 
-        return {"status": "queued", "message": "File diterima dan sedang diproses di background."}
+        return {"status": "queued", "message": "Processing started in background."}
 
     except Exception as e:
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-        print(f"❌ Terjadi kesalahan awal: {str(e)}", flush=True)
-        raise HTTPException(
-            status_code=500, detail=f"Internal Server Error: {str(e)}"
-        )
+        log(f"❌ Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================
+# BACKGROUND PROCESSING — Inti dari perbaikan
+# ============================================
 def process_transcription_background(
     temp_file_path: str,
     callback_url: str,
-    language: str = "auto"
+    language: str = "id"
 ):
     start_time = time.time()
 
-    # Resolusi kode bahasa untuk Whisper
     whisper_lang = LANG_MAP.get(language, None)
-    if whisper_lang is None:
-        whisper_lang = None  # auto-detect jika tidak dikenali
-        print(f"⚠️  Bahasa '{language}' tidak dikenali, akan auto-detect", flush=True)
+    log(f"🌐 Bahasa target: {language} → {whisper_lang or 'auto'}")
+
+    # Reset progress state
+    progress_state["active"] = True
+    progress_state["percentage"] = 0
+    progress_state["current_segment"] = 0
+    progress_state["total_segments"] = 0
+    progress_state["callback_url"] = callback_url
+    progress_state["transcription"] = []
+    progress_state["error"] = None
+
+    # Mulai thread monitor progress ke cPanel
+    monitor = threading.Thread(
+        target=progress_monitor_thread,
+        args=(callback_url, 5),  # update setiap 5 detik
+        daemon=True
+    )
+    monitor.start()
+    log("🧵 Progress monitor thread dimulai")
 
     try:
-        elapsed = lambda: time.time() - start_time
+        log(f"\n🔊 MULAI TRANSKRIPSI")
+        log(f"   Model: {MODEL_NAME}")
+        log(f"   Threads: {CPU_THREADS}")
+        log(f"   Beam: {BEAM_SIZE}")
+        log(f"   VAD: {VAD_FILTER}")
+        log(f"   Chunk: {CHUNK_LENGTH}s")
+        log(f"   Mulai: {time.strftime('%H:%M:%S')}\n")
 
-        print("\n" + "="*55, flush=True)
-        print(f"🔊 MULAI TRANSKRIPSI", flush=True)
-        print(f"   Model      : {MODEL_NAME}", flush=True)
-        print(f"   Bahasa     : {language} → {whisper_lang or 'auto'}", flush=True)
-        print(f"   Threads    : {CPU_THREADS}", flush=True)
-        print(f"   Beam size  : {BEAM_SIZE}", flush=True)
-        print(f"   VAD filter : {VAD_FILTER}", flush=True)
-        print(f"   Start time : {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-        print("="*55 + "\n", flush=True)
-
-        # === LANGKAH 1: Load audio ke memori ===
-        log_progress(f"Memuat file audio ke memori...", elapsed())
-        load_start = time.time()
-
+        # === TRANSKRIPSI DENGAN PROGRESS CALLBACK ===
         segments, info = model.transcribe(
             temp_file_path,
-            language=whisper_lang,           # <-- Paksa bahasa (atau auto-detect)
-            beam_size=BEAM_SIZE,             # <-- 1 = super cepat di CPU
-            vad_filter=VAD_FILTER,           # <-- Skip bagian sunyi
-            word_timestamps=WORD_TIMESTAMPS, # <-- FALSE = lebih cepat
+            language=whisper_lang,
+            beam_size=BEAM_SIZE,
+            vad_filter=VAD_FILTER,
+            word_timestamps=WORD_TIMESTAMPS,
+            chunk_length=CHUNK_LENGTH,
+            progress_callback=whisper_progress_callback  # ← PROGRESS REALTIME
         )
 
-        load_time = time.time() - load_start
-        elapsed_total = time.time() - start_time
-        log_progress(f"Model selesai memproses audio! ({load_time:.1f}s)", elapsed_total())
-
-        # === LANGKAH 2: Proses hasil ===
-        if info:
-            lang = getattr(info, "language", "unknown") or "unknown"
-            prob = getattr(info, "language_probability", 0) or 0
-            log_progress(f"🌍 Terdeteksi bahasa: {lang} (probabilitas: {prob:.2%})", elapsed_total())
-
+        # === PROSES SEGMENTS ===
         final_transcription = []
         segment_count = 0
 
-        # === LANGKAH 3: Ambil segment per segment ===
-        log_progress(f"Memulai ekstraksi segmen...", elapsed_total())
+        log(f"✅ Model selesai! Mengambil segmen... (bahasa: {info.language} @ {info.language_probability:.0%})")
 
         for i, segment in enumerate(segments, 1):
             segment_count += 1
-            seg_elapsed = time.time() - start_time
+            progress_state["current_segment"] = segment_count
 
-            # Escape HTML
             esc_text = segment.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
             entry = {
                 "text_html": esc_text,
                 "speaker": "Unknown",
@@ -174,46 +256,44 @@ def process_transcription_background(
             }
             final_transcription.append(entry)
 
-            # Log setiap segmen (SANGAT DETAIL)
-            text_preview = segment.text.strip()[:60]
-            if text_preview:
-                log_progress(
-                    f"Segmen #{i:03d}  │  {int(segment.start)//60:02d}:{int(segment.start)%60:02d} → {int(segment.end)//60:02d}:{int(segment.end)%60:02d}  │  \"{text_preview}...\"",
-                    seg_elapsed()
-                )
-            else:
-                log_progress(
-                    f"Segmen #{i:03d}  │  {int(segment.start)//60:02d}:{int(segment.start)%60:02d} → {int(segment.end)//60:02d}:{int(segment.end)%60:02d}  │  (kosong/sunyi)",
-                    seg_elapsed()
-                )
+            # Log setiap segmen
+            preview = segment.text.strip()[:80]
+            log(f"   Segmen #{i:03d}: [{int(segment.start)//60:02d}:{int(segment.start)%60:02d}] {preview}")
 
-        # === LANGKAH 4: Kirim hasil ke Laravel (Webhook) ===
-        log_progress(f"Transkripsi selesai! Total {segment_count} segmen. Mengirim webhook...", elapsed_total())
+        progress_state["total_segments"] = segment_count
+        elapsed = time.time() - start_time
+        log(f"\n📊 Total segmen: {segment_count}")
+        log(f"⏱️  Durasi transkripsi: {elapsed:.1f}s ({elapsed/60:.1f} menit)")
 
+        # === KIRIM HASIL KE CPANEL ===
+        log(f"📤 Mengirim hasil ke cPanel...")
+        progress_state["transcription"] = final_transcription
+        send_progress_webhook(100, segment_count, callback_url)
+
+        # Kirim hasil lengkap
         import requests
         import urllib3
-        urllib3.disable_warnings()  # Suppress SSL warning logs
+        urllib3.disable_warnings()
 
         try:
             response = requests.post(
                 callback_url,
                 json={"transcription": final_transcription},
                 timeout=30,
-                verify=False  # ⚠️ Nonaktifkan SSL verify karena cert cPanel tidak cocok dengan hostname
+                verify=False
             )
             response.raise_for_status()
-            log_progress(f"✅ Webhook BERHASIL terkirim ke Laravel! (HTTP {response.status_code})", elapsed_total())
-        except Exception as http_err:
-            log_progress(f"❌ Gagal mengirim webhook: {http_err}", elapsed_total(), "ERROR")
-
-        print("\n" + "="*55, flush=True)
-        print(f"🏁 TRANSKRIPSI SELESAI — Total waktu: {elapsed_total():.1f}s ({elapsed_total()/60:.1f} menit)", flush=True)
-        print(f"   Total segmen: {segment_count}", flush=True)
-        print(f"{'='*55}\n", flush=True)
+            log(f"✅ Webhook BERHASIL! HTTP {response.status_code}")
+        except Exception as e:
+            log(f"❌ Webhook gagal: {e}")
+            progress_state["error"] = str(e)
 
     except Exception as e:
-        elapsed_total = time.time() - start_time
-        log_progress(f"❌ ERROR FATAL: {str(e)}", elapsed_total(), "ERROR")
+        elapsed = time.time() - start_time
+        log(f"\n❌ ERROR FATAL setelah {elapsed:.1f}s: {e}")
+        progress_state["error"] = str(e)
+
+        # Kirim error ke cPanel
         import requests
         import urllib3
         urllib3.disable_warnings()
@@ -222,13 +302,19 @@ def process_transcription_background(
                 callback_url,
                 json={"transcription": [], "error": str(e)},
                 timeout=10,
-                verify=False  # Nonaktifkan SSL verify (sama seperti webhook sukses)
+                verify=False
             )
-            log_progress(f"Webhook error berhasil dikirim", elapsed_total())
         except:
-            log_progress(f"Gagal kirim webhook error", elapsed_total(), "ERROR")
+            pass
 
     finally:
+        progress_state["active"] = False
+        monitor.join(timeout=2)
+
+        # Cleanup temp file
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-            print(f"🧹 File sementara berhasil dibersihkan.", flush=True)
+            log(f"🧹 Temp file dibersihkan")
+
+        elapsed_total = time.time() - start_time
+        log(f"\n🏁 SELESAI! Total waktu: {elapsed_total:.1f}s")
