@@ -286,7 +286,7 @@ def process_transcription_background(
         })
 
         # === PROSES SEGMENTS ===
-        final_transcription = []okee
+        final_transcription = []
         import re
         previous_text = ""
         segment_count = 0
