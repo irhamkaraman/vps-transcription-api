@@ -253,7 +253,9 @@ def process_transcription_background(
         data = {
             "model": "whisper-1",
             "response_format": "verbose_json",
-            "timestamp_granularities[]": "segment"
+            "timestamp_granularities[]": "segment",
+            "temperature": 0.0,
+            "prompt": "Ini adalah transkripsi rekaman bimbingan dan percakapan dalam bahasa Indonesia. Tolong transkripsi dengan akurat. Abaikan suara hening, gemerisik, atau musik. Jangan tambahkan kata-kata seperti 'subscribe', 'like', atau 'terima kasih sudah menonton'."
         }
         if whisper_lang:
             data["language"] = whisper_lang
@@ -288,10 +290,16 @@ def process_transcription_background(
         segment_count = 0
 
         for segment in segments:
+            esc_text = segment.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            
+            # --- FILTER HALUSINASI ---
+            text_lower = esc_text.lower().strip()
+            if "jangan lupa subscribe" in text_lower or "like, komen" in text_lower or text_lower == "terima kasih.":
+                continue # Buang segmen ini karena 99% hasil halusinasi AI
+            # -------------------------
+
             segment_count += 1
             progress_state["current_segment"] = segment_count
-
-            esc_text = segment.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             start_sec = segment.get("start", 0)
             end_sec = segment.get("end", 0)
             
