@@ -225,7 +225,7 @@ def process_transcription_background(
         file_size_mb = os.path.getsize(final_audio_path) / 1024 / 1024
         log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
         
-        target_model = "gpt-4o-mini-transcribe-2025-12-15"
+        target_model = "whisper-1"
 
         # === Kirim progress: 15% - Transkripsi dimulai ===
         log(f"\n🔊 MULAI TRANSKRIPSI VIA OPENAI")
