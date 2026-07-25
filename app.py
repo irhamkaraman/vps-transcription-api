@@ -294,7 +294,7 @@ def process_transcription_background(
             
             # --- FILTER HALUSINASI ---
             text_lower = esc_text.lower().strip()
-            if "jangan lupa subscribe" in text_lower or "like, komen" in text_lower or text_lower == "terima kasih.":
+            if "subscribe" in text_lower or "like" in text_lower or "komen" in text_lower or "share" in text_lower or text_lower == "terima kasih.":
                 continue # Buang segmen ini karena 99% hasil halusinasi AI
             # -------------------------
 
