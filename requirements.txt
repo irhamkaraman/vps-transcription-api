@@ -6,6 +6,7 @@ torch
 numpy<2.0.0
 requests
 pydantic
+python-dotenv
 # ============================================
 # PENTING: Install FFmpeg di VPS
 # ============================================

@@ -1,14 +1,14 @@
 import os
 import shutil
 import tempfile
-import json
 import time
 import subprocess
-import sys
-from pathlib import Path
+import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from faster_whisper import WhisperModel
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -21,35 +21,18 @@ app.add_middleware(
 )
 
 # ============================================
-# KONFIGURASI MODEL — Baca dari environment variable
+# KONFIGURASI MODEL & OPENAI
 # ============================================
-MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
-DEVICE = "cpu"
-COMPUTE_TYPE = "int8"
-CPU_THREADS = 4
-BEAM_SIZE = 1
-VAD_FILTER = True
-WORD_TIMESTAMPS = False
-CHUNK_LENGTH = 30
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+if not OPENAI_API_KEY:
+    print("⚠️ WARNING: OPENAI_API_KEY tidak ditemukan di environment. API request akan gagal!", flush=True)
 
-# Mapping bahasa Laravel → Whisper
+# Mapping bahasa Laravel → Whisper (OpenAI menggunakan format ISO-639-1)
 LANG_MAP = {
     "id": "id",
     "en": "en",
     "zh": "zh",
 }
-
-# Informasi model untuk logging
-MODEL_INFO = {
-    "tiny":   "Tiny (39 MB) — Paling cepat",
-    "base":   "Base (74 MB) — Cepat (REKOMENDASI)",
-    "small":  "Small (244 MB) — Sedang",
-    "medium": "Medium (769 MB) — Akurat",
-    "large":  "Large (1.5 GB)",
-    "large-v2": "Large-v2 (1.5 GB)",
-    "large-v3": "Large-v3 (1.5 GB)",
-}
-
 
 # ============================================
 # KONFIGURASI CALLBACK — URL Laravel cPanel untuk menerima webhook
@@ -57,10 +40,6 @@ MODEL_INFO = {
 # Jika VPS dan cPanel di server yang SAMA, gunakan localhost
 # Jika BERBEDA server, gunakan IP/domain eksternal
 CALLBACK_BASE_URL = os.getenv("CALLBACK_BASE_URL", "https://temaniskripsi.id")
-
-# ============================================
-# KONFIGURASI MODEL — Baca dari environment variable
-# ============================================
 
 # ============================================
 # GLOBAL — Progress tracking thread-safe
@@ -148,24 +127,14 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
 # ============================================
 # LOAD MODEL
 # ============================================
+# ============================================
+# LOAD MODEL
+# ============================================
 print(f"\n{'='*50}", flush=True)
-print(f"🚀 VPS TRANSCRIPTION API", flush=True)
+print(f"🚀 VPS TRANSCRIPTION API (OPENAI WHISPER)", flush=True)
 print(f"{'='*50}", flush=True)
-print(f"⏳ Memuat model Whisper [{MODEL_NAME}]: {MODEL_INFO.get(MODEL_NAME, 'Unknown')}", flush=True)
-print(f"   Device: {DEVICE} | Threads: {CPU_THREADS} | Beam: {BEAM_SIZE}", flush=True)
-print(f"   VAD Filter: {VAD_FILTER} | Chunk: {CHUNK_LENGTH}s", flush=True)
+print(f"⏳ Mode Proxy API aktif. Semua audio akan dikirim ke OpenAI.", flush=True)
 print(f"{'='*50}\n", flush=True)
-
-t0 = time.time()
-model = WhisperModel(
-    MODEL_NAME,
-    device=DEVICE,
-    compute_type=COMPUTE_TYPE,
-    cpu_threads=CPU_THREADS
-)
-load_time = time.time() - t0
-print(f"✅ Model [{MODEL_NAME}] siap! ({load_time:.1f}s)\n", flush=True)
-
 
 # ============================================
 # API ENDPOINT
@@ -258,89 +227,86 @@ def process_transcription_background(
         log(f"✅ Audio dikonversi ke WAV: {os.path.getsize(wav_file_path) / 1024:.1f} KB")
 
         # === Kirim progress: 15% - Transkripsi dimulai ===
-        log(f"\n🔊 MULAI TRANSKRIPSI")
-        log(f"   Model: {MODEL_NAME}")
-        log(f"   Threads: {CPU_THREADS}")
-        log(f"   Beam: {BEAM_SIZE}")
-        log(f"   VAD: {VAD_FILTER}")
-        log(f"   Chunk: {CHUNK_LENGTH}s")
+        log(f"\n🔊 MULAI TRANSKRIPSI VIA OPENAI")
+        log(f"   Model: whisper-1")
         log(f"   Mulai: {time.strftime('%H:%M:%S')}")
+        log(f"   Mengirim file berukuran {os.path.getsize(wav_file_path)/1024/1024:.2f} MB ke OpenAI...")
 
         progress_state["percentage"] = 15
         send_webhook(callback_url, {
             "status": "progress",
-            "progress": 15,
-            "message": f"Transkripsi dimulai dengan model {MODEL_NAME}...",
+            "progress": 30,
+            "message": f"Mengirim audio ke OpenAI Whisper...",
             "logs": list(progress_state["logs"])
         })
 
-        # === TRANSKRIPSI ===
+        # === TRANSKRIPSI OPENAI ===
         progress_state["transcription_started_at"] = time.time()
-        segments, info = model.transcribe(
-            wav_file_path,  # Gunakan file WAV yang sudah dikonversi
-            language=whisper_lang,
-            beam_size=BEAM_SIZE,
-            vad_filter=VAD_FILTER,
-            word_timestamps=WORD_TIMESTAMPS,
-            chunk_length=CHUNK_LENGTH,
+        
+        # Kirim ke OpenAI
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        }
+        files = {
+            "file": ("audio.wav", open(wav_file_path, "rb"), "audio/wav")
+        }
+        data = {
+            "model": "whisper-1",
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "segment"
+        }
+        if whisper_lang:
+            data["language"] = whisper_lang
+
+        response = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=120
         )
+        response.raise_for_status()
+        
+        result = response.json()
+        segments = result.get("segments", [])
         transcription_elapsed = time.time() - progress_state["transcription_started_at"]
 
         # === Kirim progress: 60% - Transkripsi selesai ===
         progress_state["transcription_completed_at"] = time.time()
         progress_state["percentage"] = 60
-        log(f"\n✅ Transkripsi selesai! Durasi: {transcription_elapsed:.1f}s")
-        log(f"   Bahasa terdeteksi: {info.language} ({info.language_probability:.0%})")
+        log(f"\n✅ Transkripsi selesai dari OpenAI! Durasi API: {transcription_elapsed:.1f}s")
 
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 60,
-            "message": f"Transkripsi selesai dalam {transcription_elapsed:.1f}s. Memulai parse segmen...",
+            "message": f"Transkripsi selesai dalam {transcription_elapsed:.1f}s. Memulai formatting segmen...",
             "logs": list(progress_state["logs"])
         })
 
         # === PROSES SEGMENTS ===
         final_transcription = []
         segment_count = 0
-        last_webhook_time = time.time()
-        
-        # Total durasi audio untuk menghitung persentase secara real-time
-        # Jika info.duration tidak akurat, kita estimasi saja dari start segment
-        total_duration = getattr(info, 'duration', 0)
 
-        for i, segment in enumerate(segments, 1):
+        for segment in segments:
             segment_count += 1
             progress_state["current_segment"] = segment_count
 
-            esc_text = segment.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            esc_text = segment.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            start_sec = segment.get("start", 0)
+            end_sec = segment.get("end", 0)
+            
             entry = {
                 "text_html": esc_text,
                 "speaker": "Unknown",
-                "timestamp": f"{int(segment.start)//60:02d}:{int(segment.start)%60:02d} - {int(segment.end)//60:02d}:{int(segment.end)%60:02d}",
-                "start_sec": round(segment.start, 2),
-                "end_sec": round(segment.end, 2),
+                "timestamp": f"{int(start_sec)//60:02d}:{int(start_sec)%60:02d} - {int(end_sec)//60:02d}:{int(end_sec)%60:02d}",
+                "start_sec": round(start_sec, 2),
+                "end_sec": round(end_sec, 2),
             }
             final_transcription.append(entry)
 
             # Log setiap segmen
-            preview = segment.text.strip()[:80]
-            log(f"   Segmen #{i:03d}: [{int(segment.start)//60:02d}:{int(segment.start)%60:02d}] {preview}")
-            
-            # Update persentase (mulai dari 60% menuju 80%)
-            current_time = time.time()
-            if current_time - last_webhook_time > 3.0:
-                current_percent = 60
-                if total_duration > 0:
-                    current_percent = 60 + min(19, int((segment.end / total_duration) * 20))
-                
-                send_webhook(callback_url, {
-                    "status": "progress",
-                    "progress": current_percent,
-                    "message": f"Menganalisis audio... ({int(segment.start)//60:02d}:{int(segment.start)%60:02d})",
-                    "transcription": final_transcription,
-                    "logs": list(progress_state["logs"])
-                })
-                last_webhook_time = current_time
+            preview = esc_text.strip()[:80]
+            log(f"   Segmen #{segment_count:03d}: [{int(start_sec)//60:02d}:{int(start_sec)%60:02d}] {preview}")
 
         # === Kirim progress: 80% - Segmen selesai ===
         progress_state["total_segments"] = segment_count
