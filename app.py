@@ -249,12 +249,12 @@ def process_transcription_background(
         files = {
             "file": (os.path.basename(final_audio_path), open(final_audio_path, "rb"), "audio/m4a")
         }
+        lang_name = "Indonesia" if whisper_lang == "id" else ("Inggris" if whisper_lang == "en" else whisper_lang)
         data = {
             "model": "whisper-1",
             "response_format": "verbose_json",
             "timestamp_granularities[]": "segment",
-            "temperature": 0.0,
-            "prompt": "Ini adalah transkripsi rekaman bimbingan dan percakapan dalam bahasa Indonesia. Tolong transkripsi dengan akurat. Abaikan suara hening, gemerisik, atau musik. Jangan tambahkan kata-kata seperti 'subscribe', 'like', atau 'terima kasih sudah menonton'."
+            "prompt": f"Ini adalah transkripsi rekaman bimbingan dan percakapan dalam bahasa {lang_name}. Tolong transkripsi dengan akurat. Abaikan suara hening, gemerisik, atau musik. Jangan tambahkan kata-kata seperti 'subscribe', 'like', atau 'terima kasih sudah menonton'."
         }
         if whisper_lang:
             data["language"] = whisper_lang
