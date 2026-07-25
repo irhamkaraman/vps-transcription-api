@@ -207,30 +207,29 @@ def process_transcription_background(
     progress_state["total_duration_sec"] = 0
 
     try:
-        # === Kirim progress awal: 5% - Pre-processing dimulai ===
+        # === Kirim progress awal: 5% - Pre-processing ===
         log(f"\n🔧 PRE-PROCESSING AUDIO")
-        log(f"   Konversi ke WAV 16kHz mono...")
+        log(f"   Menyiapkan file audio asli untuk OpenAI...")
 
         progress_state["percentage"] = 5
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 5,
-            "message": "Pre-processing audio (konversi ke WAV)...",
+            "message": "Menyiapkan file audio...",
             "logs": list(progress_state["logs"])
         })
 
-        # Konversi ke WAV 16kHz mono
-        wav_file_path = temp_file_path + ".wav"
-        if not convert_to_wav(temp_file_path, wav_file_path):
-            raise Exception("FFmpeg gagal mengkonversi audio ke WAV")
-
-        log(f"✅ Audio dikonversi ke WAV: {os.path.getsize(wav_file_path) / 1024:.1f} KB")
+        # OpenAI Whisper API mendukung m4a, mp3, wav, dll secara native!
+        # Kita LANGSUNG kirim file aslinya tanpa perlu FFmpeg
+        final_audio_path = temp_file_path
+        file_size_mb = os.path.getsize(final_audio_path) / 1024 / 1024
+        log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
 
         # === Kirim progress: 15% - Transkripsi dimulai ===
         log(f"\n🔊 MULAI TRANSKRIPSI VIA OPENAI")
         log(f"   Model: whisper-1")
         log(f"   Mulai: {time.strftime('%H:%M:%S')}")
-        log(f"   Mengirim file berukuran {os.path.getsize(wav_file_path)/1024/1024:.2f} MB ke OpenAI...")
+        log(f"   Mengirim file berukuran {file_size_mb:.2f} MB ke OpenAI...")
 
         progress_state["percentage"] = 15
         send_webhook(callback_url, {
@@ -248,7 +247,7 @@ def process_transcription_background(
             "Authorization": f"Bearer {OPENAI_API_KEY}"
         }
         files = {
-            "file": ("audio.wav", open(wav_file_path, "rb"), "audio/wav")
+            "file": (os.path.basename(final_audio_path), open(final_audio_path, "rb"), "audio/m4a")
         }
         data = {
             "model": "whisper-1",
@@ -387,6 +386,3 @@ def process_transcription_background(
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
             log(f"🧹 Temp file dibersihkan")
-        if wav_file_path and os.path.exists(wav_file_path):
-            os.remove(wav_file_path)
-            log(f"🧹 WAV file dibersihkan")
