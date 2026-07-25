@@ -293,25 +293,12 @@ def process_transcription_background(
         for segment in segments:
             esc_text = segment.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             
-            # --- FILTER HALUSINASI & LOOPING (POST-PROCESSOR) ---
+            # --- FILTER HALUSINASI (POST-PROCESSOR) ---
             text_lower = esc_text.lower().strip()
             
             # 1. Filter kata template YouTube / Halusinasi
             if "subscribe" in text_lower or "like" in text_lower or "komen" in text_lower or "share" in text_lower or "terima kasih" in text_lower or "selamat menikmati" in text_lower:
                 continue 
-
-            clean_current = re.sub(r'[^\w\s]', '', text_lower).strip()
-            words = clean_current.split()
-            
-            # 2. Filter Kaset Kusut (Jika AI mengulang 1-2 kata terus menerus dalam satu segmen)
-            # Contoh: "perkembangan teknologi perkembangan teknologi"
-            if len(words) >= 4 and len(set(words)) <= 2:
-                continue
-
-            # 3. Filter Duplikasi Beruntun (Jika AI mengulang segmen sebelumnya)
-            clean_previous = re.sub(r'[^\w\s]', '', previous_text.lower()).strip()
-            if clean_current and clean_current == clean_previous:
-                continue
 
             previous_text = esc_text
             # ----------------------------------------------------
