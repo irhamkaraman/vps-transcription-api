@@ -224,10 +224,12 @@ def process_transcription_background(
         final_audio_path = temp_file_path
         file_size_mb = os.path.getsize(final_audio_path) / 1024 / 1024
         log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
+        
+        target_model = "gpt-4o-mini-transcribe-2025-12-15"
 
         # === Kirim progress: 15% - Transkripsi dimulai ===
         log(f"\n🔊 MULAI TRANSKRIPSI VIA OPENAI")
-        log(f"   Model: whisper-1")
+        log(f"   Model: {target_model}")
         log(f"   Mulai: {time.strftime('%H:%M:%S')}")
         log(f"   Mengirim file berukuran {file_size_mb:.2f} MB ke OpenAI...")
 
@@ -251,7 +253,7 @@ def process_transcription_background(
         }
         lang_name = "Indonesia" if whisper_lang == "id" else ("Inggris" if whisper_lang == "en" else whisper_lang)
         data = {
-            "model": "gpt-4o-mini-transcribe-2025-12-15",
+            "model": target_model,
             "response_format": "verbose_json",
             "timestamp_granularities[]": "segment",
             "temperature": "0.1",
@@ -267,7 +269,11 @@ def process_transcription_background(
             data=data,
             timeout=120
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            log(f"❌ OpenAI API Error: {e.response.text}")
+            raise e
         
         result = response.json()
         segments = result.get("segments", [])
