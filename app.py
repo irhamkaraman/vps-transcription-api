@@ -251,10 +251,11 @@ def process_transcription_background(
         }
         lang_name = "Indonesia" if whisper_lang == "id" else ("Inggris" if whisper_lang == "en" else whisper_lang)
         data = {
-            "model": "whisper-1",
+            "model": "gpt-4o-mini-transcribe-2025-12-15",
             "response_format": "verbose_json",
             "timestamp_granularities[]": "segment",
-            "prompt": f"Ini adalah transkripsi rekaman bimbingan dan percakapan dalam bahasa {lang_name}. Tolong transkripsi dengan akurat. Abaikan suara hening, gemerisik, atau musik. Jangan tambahkan kata-kata seperti 'subscribe', 'like', atau 'terima kasih sudah menonton'."
+            "temperature": "0.1",
+            "prompt": f"Berikut adalah transkripsi rekaman percakapan dan bimbingan dalam bahasa {lang_name}."
         }
         if whisper_lang:
             data["language"] = whisper_lang
@@ -285,7 +286,7 @@ def process_transcription_background(
         })
 
         # === PROSES SEGMENTS ===
-        final_transcription = []
+        final_transcription = []okee
         import re
         previous_text = ""
         segment_count = 0
