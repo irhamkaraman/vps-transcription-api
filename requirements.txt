@@ -7,6 +7,8 @@ numpy<2.0.0
 requests
 pydantic
 python-dotenv
+transformers
+gdown
 # ============================================
 # PENTING: Install FFmpeg di VPS
 # ============================================

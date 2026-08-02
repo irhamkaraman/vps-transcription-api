@@ -7,6 +7,9 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+import torch
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 load_dotenv()
 
@@ -127,14 +130,33 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
 # ============================================
 # LOAD MODEL
 # ============================================
-# ============================================
-# LOAD MODEL
-# ============================================
 print(f"\n{'='*50}", flush=True)
-print(f"🚀 VPS TRANSCRIPTION API (OPENAI WHISPER)", flush=True)
+print(f"🚀 VPS TRANSCRIPTION API (OPENAI WHISPER + INDOBERT)", flush=True)
 print(f"{'='*50}", flush=True)
 print(f"⏳ Mode Proxy API aktif. Semua audio akan dikirim ke OpenAI.", flush=True)
 print(f"{'='*50}\n", flush=True)
+
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
+print(f"Loading IndoBERT dari {MODEL_DIR}...", flush=True)
+try:
+    indobert_tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+    indobert_model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR)
+    indobert_model.eval()
+    
+    indobert_labels_list = list(indobert_model.config.id2label.values())
+    advice_labels_ref = ['arahan_eksplisit', 'bimbingan_bertahap', 'dukungan_keputusan', 'jawaban_tegas', 'petunjuk_kontekstual']
+    modes_labels_ref = ['otoritas', 'power_gaining', 'power_maintaining', 'power_over']
+
+    advice_indices = [i for i, label in enumerate(indobert_labels_list) if label in advice_labels_ref]
+    modes_indices = [i for i, label in enumerate(indobert_labels_list) if label in modes_labels_ref]
+    print(f"✅ IndoBERT berhasil dimuat! Label tersedia: {len(indobert_labels_list)}", flush=True)
+except Exception as e:
+    print(f"⚠️ WARNING: Gagal meload model IndoBERT: {e}", flush=True)
+    indobert_tokenizer = None
+    indobert_model = None
+    indobert_labels_list = []
+    advice_indices = []
+    modes_indices = []
 
 # ============================================
 # API ENDPOINT
@@ -315,12 +337,50 @@ def process_transcription_background(
             start_sec = segment.get("start", 0)
             end_sec = segment.get("end", 0)
             
+            # --- INDOBERT ANALYSIS ---
+            advice_giving = ""
+            modes_of_interaction = ""
+            if indobert_tokenizer and indobert_model and esc_text.strip():
+                try:
+                    inputs = indobert_tokenizer([esc_text], padding=True, truncation=True, max_length=128, return_tensors="pt")
+                    with torch.no_grad():
+                        outputs = indobert_model(**inputs)
+                        probs = torch.sigmoid(outputs.logits).numpy()[0]
+                        
+                        # Advice Giving
+                        advice_giving_labels = []
+                        advice_probs = probs[advice_indices]
+                        if len(advice_probs) > 0:
+                            if np.max(advice_probs) > 0.5:
+                                for idx in advice_indices:
+                                    if probs[idx] > 0.5:
+                                        advice_giving_labels.append(indobert_labels_list[idx])
+                            else:
+                                advice_giving_labels.append(indobert_labels_list[advice_indices[np.argmax(advice_probs)]])
+                            advice_giving = ", ".join(advice_giving_labels)
+                            
+                        # Modes of Interaction
+                        modes_labels_list = []
+                        modes_probs = probs[modes_indices]
+                        if len(modes_probs) > 0:
+                            if np.max(modes_probs) > 0.5:
+                                for idx in modes_indices:
+                                    if probs[idx] > 0.5:
+                                        modes_labels_list.append(indobert_labels_list[idx])
+                            else:
+                                modes_labels_list.append(indobert_labels_list[modes_indices[np.argmax(modes_probs)]])
+                            modes_of_interaction = ", ".join(modes_labels_list)
+                except Exception as e:
+                    log(f"⚠️ IndoBERT error on segment {segment_count}: {e}")
+
             entry = {
                 "text_html": esc_text,
                 "speaker": "Unknown",
                 "timestamp": f"{int(start_sec)//60:02d}:{int(start_sec)%60:02d} - {int(end_sec)//60:02d}:{int(end_sec)%60:02d}",
                 "start_sec": round(start_sec, 2),
                 "end_sec": round(end_sec, 2),
+                "advice_giving": advice_giving,
+                "modes_of_interaction": modes_of_interaction,
             }
             final_transcription.append(entry)
 
