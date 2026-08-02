@@ -197,7 +197,7 @@ def process_transcription_background(
         "error": None
     }
     
-    def job_job_log(msg: str):
+    def job_log(msg: str):
         ts = time.strftime("%H:%M:%S")
         log_entry = {"time": ts, "msg": msg, "timestamp": time.time()}
         state["logs"].append(log_entry)
