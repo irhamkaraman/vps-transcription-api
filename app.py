@@ -244,7 +244,7 @@ def process_transcription_background(
         if ext not in supported_exts:
             job_log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
             wav_file_path = tempfile.mktemp(suffix=".wav")
-            if ffmpeg_convert_to_wav(temp_file_path, wav_file_path):
+            if convert_to_wav(temp_file_path, wav_file_path):
                 final_audio_path = wav_file_path
                 job_log("✅ Konversi ke .wav berhasil")
             else:
