@@ -47,27 +47,9 @@ CALLBACK_BASE_URL = os.getenv("CALLBACK_BASE_URL", "https://temaniskripsi.id")
 # ============================================
 # GLOBAL — Progress tracking thread-safe
 # ============================================
-progress_state = {
-    "active": False,
-    "percentage": 0,
-    "current_segment": 0,
-    "total_segments": 0,
-    "callback_url": "",
-    "transcription": [],
-    "error": None,
-    "logs": [],
-    "processing_started_at": None,
-    "transcription_started_at": None,
-    "transcription_completed_at": None,
-    "total_duration_sec": 0,
-}
-
-
 def log(msg: str):
-    """Logging dengan timestamp + simpan ke progress_state"""
+    """Logging dengan timestamp (Global)"""
     ts = time.strftime("%H:%M:%S")
-    log_entry = {"time": ts, "msg": msg, "timestamp": time.time()}
-    progress_state["logs"].append(log_entry)
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -208,37 +190,50 @@ def process_transcription_background(
     callback_url: str,
     language: str = "id"
 ):
+    state = {
+        "percentage": 0,
+        "logs": [],
+        "transcription_started_at": None,
+        "error": None
+    }
+    
+    def job_job_log(msg: str):
+        ts = time.strftime("%H:%M:%S")
+        log_entry = {"time": ts, "msg": msg, "timestamp": time.time()}
+        state["logs"].append(log_entry)
+        print(f"[{ts}] {msg}", flush=True)
+
     start_time = time.time()
     wav_file_path = None
 
     whisper_lang = LANG_MAP.get(language, None)
-    log(f"🌐 Bahasa target: {language} → {whisper_lang or 'auto'}")
+    job_log(f"🌐 Bahasa target: {language} → {whisper_lang or 'auto'}")
 
     # Reset progress state
-    progress_state["active"] = True
-    progress_state["percentage"] = 0
-    progress_state["current_segment"] = 0
-    progress_state["total_segments"] = 0
-    progress_state["callback_url"] = callback_url
-    progress_state["transcription"] = []
-    progress_state["error"] = None
-    progress_state["logs"] = []
-    progress_state["processing_started_at"] = time.time()
-    progress_state["transcription_started_at"] = None
-    progress_state["transcription_completed_at"] = None
-    progress_state["total_duration_sec"] = 0
+    state["active"] = True
+    state["percentage"] = 0
+    state["current_segment"] = 0
+    state["total_segments"] = 0
+    state["callback_url"] = callback_url
+    state["transcription"] = []
+    state["error"] = None
+    state["logs"] = []
+    state["processing_started_at"] = time.time()
+    state["transcription_started_at"] = None
+    state["transcription_completed_at"] = None
+    state["total_duration_sec"] = 0
 
     try:
         # === Kirim progress awal: 5% - Pre-processing ===
-        log(f"\n🔧 PRE-PROCESSING AUDIO")
-        log(f"   Menyiapkan file audio asli untuk OpenAI...")
+        job_log(f"\n🔧 PRE-PROCESSING AUDIO")
+        job_log(f"   Menyiapkan file audio asli untuk OpenAI...")
 
-        progress_state["percentage"] = 5
+        state["percentage"] = 5
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 5,
             "message": "Menyiapkan file audio...",
-            "logs": list(progress_state["logs"])
+            "logs": list(state["logs"])
         })
 
         # OpenAI Whisper API mendukung flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm
@@ -247,35 +242,35 @@ def process_transcription_background(
         
         final_audio_path = temp_file_path
         if ext not in supported_exts:
-            log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
+            job_log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
             wav_file_path = tempfile.mktemp(suffix=".wav")
             if ffmpeg_convert_to_wav(temp_file_path, wav_file_path):
                 final_audio_path = wav_file_path
-                log("✅ Konversi ke .wav berhasil")
+                job_log("✅ Konversi ke .wav berhasil")
             else:
-                log("❌ Konversi gagal, mencoba mengirim aslinya...")
+                job_log("❌ Konversi gagal, mencoba mengirim aslinya...")
                 
         file_size_mb = os.path.getsize(final_audio_path) / 1024 / 1024
-        log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
+        job_log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
         
         target_model = "whisper-1"
 
         # === Kirim progress: 15% - Transkripsi dimulai ===
-        log(f"\n🔊 MULAI TRANSKRIPSI VIA OPENAI")
-        log(f"   Model: {target_model}")
-        log(f"   Mulai: {time.strftime('%H:%M:%S')}")
-        log(f"   Mengirim file berukuran {file_size_mb:.2f} MB ke OpenAI...")
+        job_log(f"\n🔊 MULAI TRANSKRIPSI VIA OPENAI")
+        job_log(f"   Model: {target_model}")
+        job_log(f"   Mulai: {time.strftime('%H:%M:%S')}")
+        job_log(f"   Mengirim file berukuran {file_size_mb:.2f} MB ke OpenAI...")
 
-        progress_state["percentage"] = 15
+        state["percentage"] = 15
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 30,
             "message": f"Mengirim audio ke OpenAI Whisper...",
-            "logs": list(progress_state["logs"])
+            "logs": list(state["logs"])
         })
 
         # === TRANSKRIPSI OPENAI ===
-        progress_state["transcription_started_at"] = time.time()
+        state["transcription_started_at"] = time.time()
         
         # Kirim ke OpenAI
         headers = {
@@ -305,23 +300,23 @@ def process_transcription_background(
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
-            log(f"❌ OpenAI API Error: {e.response.text}")
+            job_log(f"❌ OpenAI API Error: {e.response.text}")
             raise e
         
         result = response.json()
         segments = result.get("segments", [])
-        transcription_elapsed = time.time() - progress_state["transcription_started_at"]
+        transcription_elapsed = time.time() - state["transcription_started_at"]
 
         # === Kirim progress: 60% - Transkripsi selesai ===
-        progress_state["transcription_completed_at"] = time.time()
-        progress_state["percentage"] = 60
-        log(f"\n✅ Transkripsi selesai dari OpenAI! Durasi API: {transcription_elapsed:.1f}s")
+        state["transcription_completed_at"] = time.time()
+        state["percentage"] = 60
+        job_log(f"\n✅ Transkripsi selesai dari OpenAI! Durasi API: {transcription_elapsed:.1f}s")
 
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 60,
             "message": f"Transkripsi selesai dalam {transcription_elapsed:.1f}s. Memulai formatting segmen...",
-            "logs": list(progress_state["logs"])
+            "logs": list(state["logs"])
         })
 
         # === PROSES SEGMENTS ===
@@ -344,7 +339,7 @@ def process_transcription_background(
             # ----------------------------------------------------
 
             segment_count += 1
-            progress_state["current_segment"] = segment_count
+            state["current_segment"] = segment_count
             start_sec = segment.get("start", 0)
             end_sec = segment.get("end", 0)
             
@@ -382,7 +377,7 @@ def process_transcription_background(
                                 modes_labels_list.append(indobert_labels_list[modes_indices[np.argmax(modes_probs)]])
                             modes_of_interaction = ", ".join(modes_labels_list)
                 except Exception as e:
-                    log(f"⚠️ IndoBERT error on segment {segment_count}: {e}")
+                    job_log(f"⚠️ IndoBERT error on segment {segment_count}: {e}")
 
             entry = {
                 "text_html": esc_text,
@@ -397,28 +392,28 @@ def process_transcription_background(
 
             # Log setiap segmen
             preview = esc_text.strip()[:80]
-            log(f"   Segmen #{segment_count:03d}: [{int(start_sec)//60:02d}:{int(start_sec)%60:02d}] {preview} | Advice: {advice_giving} | Modes: {modes_of_interaction}")
+            job_log(f"   Segmen #{segment_count:03d}: [{int(start_sec)//60:02d}:{int(start_sec)%60:02d}] {preview} | Advice: {advice_giving} | Modes: {modes_of_interaction}")
 
         # === Kirim progress: 80% - Segmen selesai ===
-        progress_state["total_segments"] = segment_count
-        progress_state["percentage"] = 80
-        progress_state["transcription"] = final_transcription
+        state["total_segments"] = segment_count
+        state["percentage"] = 80
+        state["transcription"] = final_transcription
 
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 80,
             "message": f"Parse segmen selesai: {segment_count} segmen ditemukan.",
             "transcription": final_transcription,
-            "logs": list(progress_state["logs"])
+            "logs": list(state["logs"])
         })
 
         # === Kirim hasil final ===
-        progress_state["percentage"] = 100
-        log(f"\n📊 Total segmen: {segment_count}")
-        log(f"📤 Mengirim hasil final ke Laravel...")
+        state["percentage"] = 100
+        job_log(f"\n📊 Total segmen: {segment_count}")
+        job_log(f"📤 Mengirim hasil final ke Laravel...")
 
         total_elapsed = time.time() - start_time
-        progress_state["total_duration_sec"] = round(total_elapsed, 1)
+        state["total_duration_sec"] = round(total_elapsed, 1)
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -435,7 +430,7 @@ def process_transcription_background(
                 "transcription": final_transcription,
                 "progress": 100,
                 "message": f"Transkripsi selesai! {segment_count} segmen, durasi {total_elapsed:.1f}s",
-                "logs": list(progress_state["logs"]),
+                "logs": list(state["logs"]),
                 "total_segments": segment_count,
                 "total_duration_sec": round(total_elapsed, 1)
             },
@@ -444,14 +439,14 @@ def process_transcription_background(
             verify=False
         )
         response.raise_for_status()
-        log(f"✅ Webhook BERHASIL! HTTP {response.status_code}")
-        log(f"🏁 SELESAI! Total waktu: {total_elapsed:.1f}s")
+        job_log(f"✅ Webhook BERHASIL! HTTP {response.status_code}")
+        job_log(f"🏁 SELESAI! Total waktu: {total_elapsed:.1f}s")
 
     except Exception as e:
         elapsed = time.time() - start_time
-        log(f"\n❌ ERROR FATAL setelah {elapsed:.1f}s: {e}")
-        progress_state["error"] = str(e)
-        progress_state["percentage"] = 0
+        job_log(f"\n❌ ERROR FATAL setelah {elapsed:.1f}s: {e}")
+        state["error"] = str(e)
+        state["percentage"] = 0
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
@@ -461,12 +456,12 @@ def process_transcription_background(
             "error": str(e),
             "progress": 0,
             "message": f"Error: {str(e)}",
-            "logs": list(progress_state["logs"])
+            "logs": list(state["logs"])
         })
 
     finally:
-        progress_state["active"] = False
+        state["active"] = False
         # Cleanup temp files
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-            log(f"🧹 Temp file dibersihkan")
+            job_log(f"🧹 Temp file dibersihkan")
