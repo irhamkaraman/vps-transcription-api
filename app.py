@@ -277,7 +277,7 @@ def process_transcription_background(
             "Authorization": f"Bearer {OPENAI_API_KEY}"
         }
         files = {
-            "file": (os.path.basename(final_audio_path), open(final_audio_path, "rb"), "audio/m4a")
+            "file": (os.path.basename(final_audio_path), open(final_audio_path, "rb"))
         }
         lang_name = "Indonesia" if whisper_lang == "id" else ("Inggris" if whisper_lang == "en" else whisper_lang)
         data = {
