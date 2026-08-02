@@ -386,7 +386,7 @@ def process_transcription_background(
 
             # Log setiap segmen
             preview = esc_text.strip()[:80]
-            log(f"   Segmen #{segment_count:03d}: [{int(start_sec)//60:02d}:{int(start_sec)%60:02d}] {preview}")
+            log(f"   Segmen #{segment_count:03d}: [{int(start_sec)//60:02d}:{int(start_sec)%60:02d}] {preview} | Advice: {advice_giving} | Modes: {modes_of_interaction}")
 
         # === Kirim progress: 80% - Segmen selesai ===
         progress_state["total_segments"] = segment_count
