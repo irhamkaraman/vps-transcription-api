@@ -241,9 +241,20 @@ def process_transcription_background(
             "logs": list(progress_state["logs"])
         })
 
-        # OpenAI Whisper API mendukung m4a, mp3, wav, dll secara native!
-        # Kita LANGSUNG kirim file aslinya tanpa perlu FFmpeg
+        # OpenAI Whisper API mendukung flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm
+        ext = os.path.splitext(temp_file_path)[1].lower()
+        supported_exts = [".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"]
+        
         final_audio_path = temp_file_path
+        if ext not in supported_exts:
+            log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
+            wav_file_path = tempfile.mktemp(suffix=".wav")
+            if ffmpeg_convert_to_wav(temp_file_path, wav_file_path):
+                final_audio_path = wav_file_path
+                log("✅ Konversi ke .wav berhasil")
+            else:
+                log("❌ Konversi gagal, mencoba mengirim aslinya...")
+                
         file_size_mb = os.path.getsize(final_audio_path) / 1024 / 1024
         log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
         
