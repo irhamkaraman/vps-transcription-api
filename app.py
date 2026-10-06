@@ -468,19 +468,75 @@ def process_transcription_background(
 
 
 # ============================================
-# V2 ENDPOINTS (WhisperX + RoBERTa MultiTask)
+# V2 ENDPOINTS (OpenAI Diarize + RoBERTa MultiTask)
 # ============================================
 import asyncio
-import torch
+import contextlib
+from collections import Counter
+
 import torch.nn as nn
 from fastapi import WebSocket, WebSocketDisconnect
+from transformers import AutoConfig, AutoModel
 
-# --- RoBERTa Architecture ---
+V2_DIARIZE_MODEL = os.getenv("V2_DIARIZE_MODEL", "gpt-4o-transcribe-diarize")
+V2_BASE_MODEL = "cahya/roberta-base-indonesian-522M"
+V2_MODEL_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "whisperx-roberta-version", "models", "multi_task_roberta_v2",
+)
+# URUTAN HARUS SAMA DENGAN SAAT TRAINING (LabelEncoder = alfabetis).
+# Sumber: notebook Train_Model_RoBERTa. Jumlah kelas sudah diverifikasi dari .pt (6 advice, 3 modes).
+V2_ADVICE_CLASSES = [
+    "arahan_eksplisit", "bimbingan_bertahap", "dukungan_keputusan",
+    "jawaban_tegas", "otoritas", "petunjuk_kontekstual",
+]
+V2_MODES_CLASSES = ["power_gaining", "power_maintaining", "power_over"]
+# "longest" = pembicara dengan durasi bicara terpanjang dianggap Dosen; "first" = yang pertama bicara
+V2_SPEAKER_RULE = os.getenv("V2_SPEAKER_RULE", "longest").lower()
+
+torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+
+
 class MultiTaskGraphRoBERTa(nn.Module):
-    def __init__(self, num_advice_classes, num_modes_classes, model_name="cahya/roberta-base-indonesian-522M"):
-        super(MultiTaskGraphRoBERTa, self).__init__()
-        # Hanya deklarasi class untuk load model nantinya
-        pass
+    """Arsitektur identik dengan notebook training."""
+
+    def __init__(self, num_advice_classes=6, num_modes_classes=3, model_name=V2_BASE_MODEL):
+        super().__init__()
+        # Bobot asli ada di file .pt, jadi cukup bangun dari config (tanpa unduh bobot 500MB)
+        self.roberta = AutoModel.from_config(AutoConfig.from_pretrained(model_name))
+        hidden_dim = self.roberta.config.hidden_size
+        self.classifier_advice = nn.Sequential(
+            nn.Linear(hidden_dim, 256), nn.ReLU(), nn.Dropout(0.3), nn.Linear(256, num_advice_classes)
+        )
+        self.classifier_modes = nn.Sequential(
+            nn.Linear(hidden_dim, 256), nn.ReLU(), nn.Dropout(0.3), nn.Linear(256, num_modes_classes)
+        )
+
+    def forward(self, input_ids, attention_mask):
+        outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.last_hidden_state[:, 0, :]
+        return self.classifier_advice(pooled_output), self.classifier_modes(pooled_output)
+
+
+v2_tokenizer = None
+v2_model = None
+try:
+    print(f"Loading RoBERTa V2 dari {V2_MODEL_DIR}...", flush=True)
+    v2_tokenizer = AutoTokenizer.from_pretrained(V2_MODEL_DIR)
+    _m = MultiTaskGraphRoBERTa(len(V2_ADVICE_CLASSES), len(V2_MODES_CLASSES))
+    _sd = torch.load(os.path.join(V2_MODEL_DIR, "multi_task_roberta_model.pt"), map_location="cpu")
+    _res = _m.load_state_dict(_sd, strict=False)
+    _missing = [k for k in _res.missing_keys if "position_ids" not in k]
+    if _missing:
+        raise RuntimeError(f"State dict tidak cocok, key hilang: {_missing[:5]}")
+    _m.eval()
+    v2_model = _m
+    print("✅ RoBERTa V2 berhasil dimuat!", flush=True)
+except Exception as e:
+    print(f"⚠️ WARNING: Gagal meload RoBERTa V2: {e}", flush=True)
+    v2_tokenizer = None
+    v2_model = None
+
 
 class ConnectionManager:
     def __init__(self):
@@ -495,7 +551,7 @@ class ConnectionManager:
             try:
                 await websocket.send_json(self.last_state[slug])
             except Exception:
-                self.disconnect(slug)
+                self.disconnect(slug, websocket)
 
     def disconnect(self, slug: str, websocket: WebSocket = None):
         # Jangan hapus koneksi baru jika yang menutup adalah koneksi lama
@@ -505,6 +561,8 @@ class ConnectionManager:
 
     async def send_progress(self, slug: str, message: dict):
         self.last_state[slug] = message
+        while len(self.last_state) > 200:  # batasi memori
+            self.last_state.pop(next(iter(self.last_state)))
         ws = self.active_connections.get(slug)
         if ws:
             try:
@@ -512,55 +570,223 @@ class ConnectionManager:
             except Exception:
                 self.disconnect(slug, ws)
 
+
 manager = ConnectionManager()
+v2_semaphore = asyncio.Semaphore(2)  # batasi job V2 paralel agar RAM/CPU aman
+
 
 @app.websocket("/api/v2/ws/{slug}")
 async def websocket_endpoint(websocket: WebSocket, slug: str):
     await manager.connect(websocket, slug)
     try:
         while True:
-            data = await websocket.receive_text()
-            if data == '{"action":"start_processing"}':
-                print(f"[{slug}] WS Client trigger start")
+            await websocket.receive_text()  # keep-alive
     except WebSocketDisconnect:
         manager.disconnect(slug, websocket)
 
-async def process_audio_pipeline(slug: str, callback_url: str):
-    await manager.send_progress(slug, {"progress": 5, "message": "Audio diterima, memulai proses..."})
-    await asyncio.sleep(1)
-    await manager.send_progress(slug, {"progress": 10, "message": "Memulai modul analisis AI..."})
-    await asyncio.sleep(2)
-    await manager.send_progress(slug, {"progress": 40, "message": "Klasifikasi segment dengan RoBERTa Multi-Task..."})
-    await asyncio.sleep(2)
-    await manager.send_progress(slug, {"progress": 80, "message": "Membangun Graph Nodes & Edges..."})
-    
-    transcription = [
-        {"speaker": "Dosen", "text": "Coba perbaiki bab 2.", "advice_giving": "arahan_eksplisit", "modes_of_interaction": "power_over"}
-    ]
-    graph_data = {
-        "nodes": [{"id": "Dosen", "label": "Dosen", "group": "speaker"}, {"id": "Mhs", "label": "Mahasiswa", "group": "speaker"}],
-        "edges": [{"from": "Dosen", "to": "Mhs", "label": "power_over"}]
-    }
-    
-    await manager.send_progress(slug, {"progress": 100, "message": "Selesai! Mengirim data ke server..."})
-    
-    import requests
-    import urllib3
-    urllib3.disable_warnings()
-    headers = {"User-Agent": "Mozilla/5.0"}
-    if "temaniskripsi.id" in callback_url:
-        callback_url = callback_url.replace("temaniskripsi.id", "103.180.164.146")
-        headers["Host"] = "temaniskripsi.id"
-    
+
+# ---------- Tahap 1: transkripsi + diarization (OpenAI) ----------
+def v2_diarize(audio_path: str, language: str) -> list:
+    url = "https://api.openai.com/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    lang = LANG_MAP.get(language)
+
+    def _call(with_lang: bool):
+        data = {
+            "model": V2_DIARIZE_MODEL,
+            "response_format": "diarized_json",
+            "chunking_strategy": "auto",
+        }
+        if with_lang and lang:
+            data["language"] = lang
+        with open(audio_path, "rb") as f:
+            return requests.post(
+                url, headers=headers,
+                files={"file": (os.path.basename(audio_path), f)},
+                data=data, timeout=900,
+            )
+
+    resp = _call(True)
+    if resp.status_code == 400 and lang:
+        log(f"⚠️ OpenAI 400 dengan parameter language, mengulang tanpa language: {resp.text[:200]}")
+        resp = _call(False)
+    if resp.status_code != 200:
+        raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text[:300]}")
+
+    segments = []
+    for s in resp.json().get("segments", []):
+        text = (s.get("text") or "").strip()
+        if not text:
+            continue
+        segments.append({
+            "speaker": s.get("speaker") or "UNKNOWN",
+            "text": text,
+            "start": float(s.get("start") or 0),
+            "end": float(s.get("end") or 0),
+        })
+    return segments
+
+
+# ---------- Tahap 2: pemetaan speaker -> peran ----------
+def v2_map_speakers(segments: list) -> list:
+    durations = Counter()
+    order = []
+    for s in segments:
+        durations[s["speaker"]] += max(0.0, s["end"] - s["start"])
+        if s["speaker"] not in order:
+            order.append(s["speaker"])
+    ranked = order if V2_SPEAKER_RULE == "first" else [sp for sp, _ in durations.most_common()]
+    names = {}
+    for i, sp in enumerate(ranked):
+        names[sp] = "Dosen" if i == 0 else ("Mahasiswa" if i == 1 else f"Pembicara {i + 1}")
+    log(f"👥 Pemetaan pembicara ({V2_SPEAKER_RULE}): {names}")
+    for s in segments:
+        s["speaker"] = names[s["speaker"]]
+    return segments
+
+
+# ---------- Tahap 3: klasifikasi RoBERTa ----------
+def v2_classify(texts: list) -> list:
+    results = []
+    batch_size = 16
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        enc = v2_tokenizer(batch, return_tensors="pt", max_length=128, padding="max_length", truncation=True)
+        with torch.no_grad():
+            logits_adv, logits_mod = v2_model(enc["input_ids"], enc["attention_mask"])
+        adv_idx = torch.argmax(logits_adv, dim=1).tolist()
+        mod_idx = torch.argmax(logits_mod, dim=1).tolist()
+        for a, m in zip(adv_idx, mod_idx):
+            results.append((V2_ADVICE_CLASSES[a], V2_MODES_CLASSES[m]))
+    return results
+
+
+# ---------- Tahap 4: graph ----------
+def v2_build_graph(items: list) -> dict:
+    def speaker_id(name: str) -> str:
+        return "Mhs" if name == "Mahasiswa" else name
+
+    nodes = {}
+    edge_counts = Counter()
+
+    def add_node(node_id, label, group):
+        nodes.setdefault(node_id, {"id": node_id, "label": label, "group": group})
+
+    prev = None
+    for it in items:
+        sid = speaker_id(it["speaker"])
+        add_node(sid, it["speaker"], "speaker")
+
+        aid = f"advice:{it['advice_giving']}"
+        add_node(aid, it["advice_giving"].replace("_", " "), "advice")
+        edge_counts[(sid, aid)] += 1
+
+        mid = f"mode:{it['modes_of_interaction']}"
+        add_node(mid, it["modes_of_interaction"].replace("_", " "), "mode")
+        edge_counts[(sid, mid)] += 1
+
+        if prev is not None and prev != sid:  # pergantian giliran bicara
+            edge_counts[(prev, sid)] += 1
+        prev = sid
+
+    edges = [{"from": a, "to": b, "label": f"{n}x"} for (a, b), n in edge_counts.items()]
+    return {"nodes": list(nodes.values()), "edges": edges}
+
+
+async def _creep_progress(slug: str, start: int, end: int, message: str, step: int = 2, interval: float = 4.0):
+    """Naikkan progress pelan-pelan selama tahap panjang (OpenAI) supaya UI tidak terlihat macet."""
+    p = start
+    while p < end:
+        await asyncio.sleep(interval)
+        p = min(end, p + step)
+        await manager.send_progress(slug, {"progress": p, "message": message})
+
+
+async def process_audio_pipeline(slug: str, callback_url: str, audio_path: str, language: str):
+    creep = None
     try:
-        requests.post(callback_url, json={"transcription": transcription, "graph_data": graph_data}, verify=False, headers=headers)
+        async with v2_semaphore:
+            await manager.send_progress(slug, {"progress": 5, "message": "Audio diterima, memulai proses..."})
+            if v2_model is None or v2_tokenizer is None:
+                raise RuntimeError("Model RoBERTa V2 tidak termuat di server.")
+            if not OPENAI_API_KEY:
+                raise RuntimeError("OPENAI_API_KEY belum dikonfigurasi di server.")
+
+            # 1) Transkripsi + diarization
+            await manager.send_progress(slug, {"progress": 15, "message": "Transkripsi & identifikasi pembicara..."})
+            creep = asyncio.create_task(_creep_progress(slug, 15, 55, "Transkripsi & identifikasi pembicara..."))
+            t0 = time.time()
+            segments = await asyncio.to_thread(v2_diarize, audio_path, language)
+            creep.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await creep
+            creep = None
+            log(f"✅ [{slug}] Diarization selesai: {len(segments)} segmen ({time.time() - t0:.1f}s)")
+            if not segments:
+                raise RuntimeError("Tidak ada ucapan yang terdeteksi pada audio.")
+
+            # 2) Peran pembicara
+            await manager.send_progress(slug, {"progress": 60, "message": "Memetakan peran pembicara..."})
+            segments = v2_map_speakers(segments)
+
+            # 3) Klasifikasi RoBERTa
+            await manager.send_progress(slug, {"progress": 65, "message": "Klasifikasi segmen dengan RoBERTa Multi-Task..."})
+            t1 = time.time()
+            preds = await asyncio.to_thread(v2_classify, [s["text"] for s in segments])
+            log(f"✅ [{slug}] Klasifikasi selesai ({time.time() - t1:.1f}s)")
+
+            transcription = []
+            for s, (adv, mod) in zip(segments, preds):
+                transcription.append({
+                    "speaker": s["speaker"],
+                    "text": s["text"],
+                    "start": round(s["start"], 2),
+                    "end": round(s["end"], 2),
+                    "advice_giving": adv,
+                    "modes_of_interaction": mod,
+                })
+
+            # 4) Graph
+            await manager.send_progress(slug, {"progress": 85, "message": "Membangun Graph Nodes & Edges..."})
+            graph_data = v2_build_graph(transcription)
+
+            # 5) Kirim ke Laravel (retry), baru beri sinyal selesai
+            await manager.send_progress(slug, {"progress": 95, "message": "Mengirim hasil ke server..."})
+            payload = {"transcription": transcription, "graph_data": graph_data}
+            sent = False
+            for attempt in range(3):
+                sent = await asyncio.to_thread(send_webhook, callback_url, payload, 60)
+                if sent:
+                    break
+                await asyncio.sleep(2 * (attempt + 1))
+            if not sent:
+                raise RuntimeError("Gagal mengirim hasil ke server Laravel (webhook).")
+
+            await manager.send_progress(slug, {"progress": 100, "message": "Selesai!"})
+            await manager.send_progress(slug, {"progress": 100, "status": "completed"})
     except Exception as e:
-        print(f"Webhook V2 failed: {e}")
-        
-    await manager.send_progress(slug, {"status": "completed"})
+        log(f"❌ [{slug}] Pipeline V2 gagal: {e}")
+        await manager.send_progress(slug, {"status": "failed", "message": f"Gagal memproses audio: {e}"})
+    finally:
+        if creep is not None:
+            creep.cancel()
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+
 
 @app.post("/api/v2/transcribe")
-async def transcribe_v2(background_tasks: BackgroundTasks, slug: str = Form(...), callback_url: str = Form(...), file: UploadFile = File(...)):
-    print(f"Menerima file V2: {slug}")
-    background_tasks.add_task(process_audio_pipeline, slug, callback_url)
+async def transcribe_v2(
+    background_tasks: BackgroundTasks,
+    slug: str = Form(...),
+    callback_url: str = Form(...),
+    language: str = Form("id"),
+    file: UploadFile = File(...),
+):
+    ext = os.path.splitext(file.filename or "")[1] or ".m4a"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        audio_path = tmp.name
+    log(f"📥 V2 diterima: slug={slug} file={file.filename} bahasa={language}")
+    await manager.send_progress(slug, {"progress": 2, "message": "Audio diterima server AI..."})
+    background_tasks.add_task(process_audio_pipeline, slug, callback_url, audio_path, language)
     return {"status": "processing_started"}
