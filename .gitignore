@@ -2,4 +2,6 @@ venv/
 __pycache__/
 storage/
 *.log
-*.env
+*.env*.pt  
+*.bin  
+*.safetensors  
