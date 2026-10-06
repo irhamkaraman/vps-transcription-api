@@ -485,21 +485,32 @@ class MultiTaskGraphRoBERTa(nn.Module):
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, WebSocket] = {}
+        # State terakhir per job, dikirim ulang saat browser (re)connect
+        self.last_state: dict[str, dict] = {}
 
     async def connect(self, websocket: WebSocket, slug: str):
         await websocket.accept()
         self.active_connections[slug] = websocket
+        if slug in self.last_state:
+            try:
+                await websocket.send_json(self.last_state[slug])
+            except Exception:
+                self.disconnect(slug)
 
-    def disconnect(self, slug: str):
-        if slug in self.active_connections:
-            del self.active_connections[slug]
+    def disconnect(self, slug: str, websocket: WebSocket = None):
+        # Jangan hapus koneksi baru jika yang menutup adalah koneksi lama
+        if websocket is not None and self.active_connections.get(slug) is not websocket:
+            return
+        self.active_connections.pop(slug, None)
 
     async def send_progress(self, slug: str, message: dict):
-        if slug in self.active_connections:
+        self.last_state[slug] = message
+        ws = self.active_connections.get(slug)
+        if ws:
             try:
-                await self.active_connections[slug].send_json(message)
-            except WebSocketDisconnect:
-                self.disconnect(slug)
+                await ws.send_json(message)
+            except Exception:
+                self.disconnect(slug, ws)
 
 manager = ConnectionManager()
 
@@ -512,14 +523,10 @@ async def websocket_endpoint(websocket: WebSocket, slug: str):
             if data == '{"action":"start_processing"}':
                 print(f"[{slug}] WS Client trigger start")
     except WebSocketDisconnect:
-        manager.disconnect(slug)
+        manager.disconnect(slug, websocket)
 
 async def process_audio_pipeline(slug: str, callback_url: str):
-    # Tunggu browser konek WS (maks 20 detik) supaya progress awal tidak hilang
-    for _ in range(40):
-        if slug in manager.active_connections:
-            break
-        await asyncio.sleep(0.5)
+    await manager.send_progress(slug, {"progress": 5, "message": "Audio diterima, memulai proses..."})
     await asyncio.sleep(1)
     await manager.send_progress(slug, {"progress": 10, "message": "Memulai modul analisis AI..."})
     await asyncio.sleep(2)
