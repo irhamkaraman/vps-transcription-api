@@ -2,6 +2,9 @@ venv/
 __pycache__/
 storage/
 *.log
-*.env*.pt  
-*.bin  
-*.safetensors  
+.env
+*.pt
+*.bin
+*.safetensors
+whisperx-roberta-version/models/
+models/
