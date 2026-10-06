@@ -515,6 +515,11 @@ async def websocket_endpoint(websocket: WebSocket, slug: str):
         manager.disconnect(slug)
 
 async def process_audio_pipeline(slug: str, callback_url: str):
+    # Tunggu browser konek WS (maks 20 detik) supaya progress awal tidak hilang
+    for _ in range(40):
+        if slug in manager.active_connections:
+            break
+        await asyncio.sleep(0.5)
     await asyncio.sleep(1)
     await manager.send_progress(slug, {"progress": 10, "message": "Memulai modul analisis AI..."})
     await asyncio.sleep(2)
