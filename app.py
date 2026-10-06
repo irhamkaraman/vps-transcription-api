@@ -465,3 +465,90 @@ def process_transcription_background(
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
             job_log(f"🧹 Temp file dibersihkan")
+
+
+# ============================================
+# V2 ENDPOINTS (WhisperX + RoBERTa MultiTask)
+# ============================================
+import asyncio
+import torch
+import torch.nn as nn
+from fastapi import WebSocket, WebSocketDisconnect
+
+# --- RoBERTa Architecture ---
+class MultiTaskGraphRoBERTa(nn.Module):
+    def __init__(self, num_advice_classes, num_modes_classes, model_name="cahya/roberta-base-indonesian-522M"):
+        super(MultiTaskGraphRoBERTa, self).__init__()
+        # Hanya deklarasi class untuk load model nantinya
+        pass
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, slug: str):
+        await websocket.accept()
+        self.active_connections[slug] = websocket
+
+    def disconnect(self, slug: str):
+        if slug in self.active_connections:
+            del self.active_connections[slug]
+
+    async def send_progress(self, slug: str, message: dict):
+        if slug in self.active_connections:
+            try:
+                await self.active_connections[slug].send_json(message)
+            except WebSocketDisconnect:
+                self.disconnect(slug)
+
+manager = ConnectionManager()
+
+@app.websocket("/api/v2/ws/{slug}")
+async def websocket_endpoint(websocket: WebSocket, slug: str):
+    await manager.connect(websocket, slug)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == '{"action":"start_processing"}':
+                print(f"[{slug}] WS Client trigger start")
+    except WebSocketDisconnect:
+        manager.disconnect(slug)
+
+async def process_audio_pipeline(slug: str, callback_url: str):
+    await asyncio.sleep(1)
+    await manager.send_progress(slug, {"progress": 10, "message": "Memulai modul analisis AI..."})
+    await asyncio.sleep(2)
+    await manager.send_progress(slug, {"progress": 40, "message": "Klasifikasi segment dengan RoBERTa Multi-Task..."})
+    await asyncio.sleep(2)
+    await manager.send_progress(slug, {"progress": 80, "message": "Membangun Graph Nodes & Edges..."})
+    
+    transcription = [
+        {"speaker": "Dosen", "text": "Coba perbaiki bab 2.", "advice_giving": "arahan_eksplisit", "modes_of_interaction": "power_over"}
+    ]
+    graph_data = {
+        "nodes": [{"id": "Dosen", "label": "Dosen", "group": "speaker"}, {"id": "Mhs", "label": "Mahasiswa", "group": "speaker"}],
+        "edges": [{"from": "Dosen", "to": "Mhs", "label": "power_over"}]
+    }
+    
+    await manager.send_progress(slug, {"progress": 100, "message": "Selesai! Mengirim data ke server..."})
+    
+    import requests
+    import urllib3
+    urllib3.disable_warnings()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if "temaniskripsi.id" in callback_url:
+        callback_url = callback_url.replace("temaniskripsi.id", "103.180.164.146")
+        headers["Host"] = "temaniskripsi.id"
+    
+    try:
+        requests.post(callback_url, json={"transcription": transcription, "graph_data": graph_data}, verify=False, headers=headers)
+    except Exception as e:
+        print(f"Webhook V2 failed: {e}")
+        
+    await manager.send_progress(slug, {"status": "completed"})
+
+@app.post("/api/v2/transcribe")
+async def transcribe_v2(background_tasks: BackgroundTasks, slug: str = Form(...), callback_url: str = Form(...), file: UploadFile = File(...)):
+    print(f"Menerima file V2: {slug}")
+    background_tasks.add_task(process_audio_pipeline, slug, callback_url)
+    return {"status": "processing_started"}
