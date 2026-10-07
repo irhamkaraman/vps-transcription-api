@@ -587,43 +587,99 @@ async def websocket_endpoint(websocket: WebSocket, slug: str):
 
 # ---------- Tahap 1: transkripsi + diarization (OpenAI) ----------
 def v2_diarize(audio_path: str, language: str) -> list:
-    url = "https://api.openai.com/v1/audio/transcriptions"
+    # 1. Transkripsi dengan whisper-1
+    url_transcribe = "https://api.openai.com/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     lang = LANG_MAP.get(language)
 
-    def _call(with_lang: bool):
+    def _transcribe(with_lang: bool):
         data = {
-            "model": V2_DIARIZE_MODEL,
-            "response_format": "diarized_json",
-            "chunking_strategy": "auto",
+            "model": "whisper-1",
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "segment",
         }
         if with_lang and lang:
             data["language"] = lang
         with open(audio_path, "rb") as f:
             return requests.post(
-                url, headers=headers,
+                url_transcribe, headers=headers,
                 files={"file": (os.path.basename(audio_path), f)},
                 data=data, timeout=900,
             )
 
-    resp = _call(True)
+    resp = _transcribe(True)
     if resp.status_code == 400 and lang:
-        log(f"⚠️ OpenAI 400 dengan parameter language, mengulang tanpa language: {resp.text[:200]}")
-        resp = _call(False)
+        resp = _transcribe(False)
     if resp.status_code != 200:
-        raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"OpenAI Whisper error {resp.status_code}: {resp.text[:300]}")
 
+    result = resp.json()
+    raw_segments = result.get("segments", [])
+    if not raw_segments:
+        return []
+
+    # 2. Diarization menggunakan LLM (gpt-4o-mini)
+    # Karena API Whisper murni tidak mendukung diarization, kita gunakan LLM untuk menebak speaker
+    # berdasarkan konteks percakapan akademik (Dosen vs Mahasiswa).
     segments = []
-    for s in resp.json().get("segments", []):
+    for s in raw_segments:
         text = (s.get("text") or "").strip()
         if not text:
             continue
         segments.append({
-            "speaker": s.get("speaker") or "UNKNOWN",
+            "id": s.get("id", 0),
+            "speaker": "UNKNOWN", # Default
             "text": text,
             "start": float(s.get("start") or 0),
             "end": float(s.get("end") or 0),
         })
+
+    if not segments:
+        return []
+
+    # Buat prompt untuk diarization
+    transcript_text = "\n".join([f"[{i}] {seg['text']}" for i, seg in enumerate(segments)])
+    system_prompt = (
+        "You are an assistant that performs speaker diarization for an academic supervision transcript. "
+        "The conversation is between a 'Dosen' (Lecturer) and a 'Mahasiswa' (Student). "
+        "Analyze the context of the following numbered segments and determine who is speaking. "
+        "Return your answer as a JSON object where keys are the segment numbers (as strings) and values are either 'Dosen' or 'Mahasiswa'. "
+        "Only output the JSON object, nothing else."
+    )
+
+    url_chat = "https://api.openai.com/v1/chat/completions"
+    chat_data = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": transcript_text}
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1
+    }
+
+    try:
+        chat_resp = requests.post(url_chat, headers=headers, json=chat_data, timeout=120)
+        chat_resp.raise_for_status()
+        import json
+        diarize_result = chat_resp.json()
+        content = diarize_result["choices"][0]["message"]["content"]
+        speaker_map = json.loads(content)
+        
+        for i, seg in enumerate(segments):
+            spk = speaker_map.get(str(i))
+            if spk in ["Dosen", "Mahasiswa"]:
+                seg["speaker"] = spk
+            else:
+                seg["speaker"] = "Mahasiswa" # Fallback
+    except Exception as e:
+        log(f"⚠️ Gagal melakukan LLM diarization: {e}. Menggunakan fallback.")
+        # Fallback sederhana: bergantian
+        current_spk = "Mahasiswa"
+        for seg in segments:
+            seg["speaker"] = current_spk
+            current_spk = "Dosen" if current_spk == "Mahasiswa" else "Mahasiswa"
+
     return segments
 
 
