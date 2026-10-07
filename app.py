@@ -593,10 +593,13 @@ def v2_diarize(audio_path: str, language: str) -> list:
     lang = LANG_MAP.get(language)
 
     def _transcribe(with_lang: bool):
+        lang_name = "Indonesia" if lang == "id" else ("Inggris" if lang == "en" else "Mandarin")
         data = {
             "model": "whisper-1",
             "response_format": "verbose_json",
             "timestamp_granularities[]": "segment",
+            "temperature": "0.1",
+            "prompt": f"Berikut adalah transkripsi rekaman percakapan dan bimbingan dalam bahasa {lang_name} secara detail dan natural."
         }
         if with_lang and lang:
             data["language"] = lang
@@ -626,6 +629,12 @@ def v2_diarize(audio_path: str, language: str) -> list:
         text = (s.get("text") or "").strip()
         if not text:
             continue
+            
+        # --- FILTER HALUSINASI ---
+        text_lower = text.lower()
+        if "subscribe" in text_lower or "like" in text_lower or "komen" in text_lower or "share" in text_lower or "terima kasih" in text_lower or "selamat menikmati" in text_lower:
+            continue
+            
         segments.append({
             "id": s.get("id", 0),
             "speaker": "UNKNOWN", # Default
@@ -841,8 +850,20 @@ async def transcribe_v2(
     ext = os.path.splitext(file.filename or "")[1] or ".m4a"
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         shutil.copyfileobj(file.file, tmp)
-        audio_path = tmp.name
+        temp_audio_path = tmp.name
+        
+    final_audio_path = temp_audio_path
+    supported_exts = [".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"]
+    if ext.lower() not in supported_exts:
+        log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
+        wav_file_path = tempfile.mktemp(suffix=".wav")
+        if convert_to_wav(temp_audio_path, wav_file_path):
+            final_audio_path = wav_file_path
+            log("✅ Konversi ke .wav berhasil")
+        else:
+            log("❌ Konversi gagal, mencoba mengirim aslinya...")
+
     log(f"📥 V2 diterima: slug={slug} file={file.filename} bahasa={language}")
     await manager.send_progress(slug, {"progress": 2, "message": "Audio diterima server AI..."})
-    background_tasks.add_task(process_audio_pipeline, slug, callback_url, audio_path, language)
+    background_tasks.add_task(process_audio_pipeline, slug, callback_url, final_audio_path, language)
     return {"status": "processing_started"}
