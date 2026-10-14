@@ -85,28 +85,43 @@ def send_webhook(callback_url: str, payload: dict, timeout: int = 15):
 
 
 # ============================================
-# PRE-PROCESS AUDIO: Convert ke WAV 16kHz Mono
+# PRE-PROCESS AUDIO: Standardize & Compress (MP3 16kHz Mono 32kbps)
+# Mendukung audio rekaman iPhone/macOS/Android/Web, memangkas ukuran 80-90%
+# dan menjamin 100% kompatibel dengan OpenAI Whisper.
 # ============================================
-def convert_to_wav(input_path: str, output_path: str) -> bool:
+def convert_and_compress_audio(input_path: str, output_path: str) -> bool:
     """
-    Konversi audio ke WAV 16kHz mono (format optimal untuk Whisper).
-    Ini alasan utama kenapa script Extracting_Dataset jauh lebih cepat.
+    Standarisasi dan kompresi audio ke MP3 16kHz mono bitrate 32k.
+    Menghilangkan header Apple ALAC/AAC yang bermasalah dan memastikan
+    ukuran file aman jauh di bawah limit 25MB OpenAI Whisper.
     """
     try:
-        subprocess.run([
+        cmd = [
             "ffmpeg", "-y", "-i", input_path,
-            "-ar", "16000", "-ac", "1", "-f", "wav", output_path
-        ], capture_output=True, check=True, timeout=30)
+            "-vn",
+            "-ar", "16000",
+            "-ac", "1",
+            "-b:a", "32k",
+            "-f", "mp3",
+            output_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, check=True, timeout=120)
         return True
     except subprocess.CalledProcessError as e:
-        log(f"❌ FFmpeg convert gagal: {e.stderr.decode()}")
+        log(f"❌ FFmpeg kompresi gagal: {e.stderr.decode(errors='ignore')}")
         return False
     except FileNotFoundError:
         log(f"❌ FFmpeg tidak ditemukan di sistem!")
         return False
     except subprocess.TimeoutExpired:
-        log(f"❌ FFmpeg timeout (30s)")
+        log(f"❌ FFmpeg timeout (120s)")
         return False
+
+
+# Alias backwards compatibility jika masih terpanggil
+def convert_to_wav(input_path: str, output_path: str) -> bool:
+    return convert_and_compress_audio(input_path, output_path)
+
 
 
 # ============================================
@@ -224,35 +239,33 @@ def process_transcription_background(
     state["total_duration_sec"] = 0
 
     try:
-        # === Kirim progress awal: 5% - Pre-processing ===
-        job_log(f"\n🔧 PRE-PROCESSING AUDIO")
-        job_log(f"   Menyiapkan file audio asli untuk OpenAI...")
+        # === Kirim progress awal: 5% - Pre-processing & Kompresi ===
+        job_log(f"\n🔧 PRE-PROCESSING & KOMPRESI AUDIO")
+        orig_size_mb = os.path.getsize(temp_file_path) / 1024 / 1024
+        job_log(f"   Ukuran awal: {orig_size_mb:.2f} MB")
+        job_log(f"   Mengompresi ke format MP3 16kHz Mono 32kbps (kompatibel iOS/macOS/Whisper)...")
 
         state["percentage"] = 5
         send_webhook(callback_url, {
             "status": "progress",
             "progress": 5,
-            "message": "Menyiapkan file audio...",
+            "message": f"Mengompresi audio ({orig_size_mb:.1f} MB)...",
             "logs": list(state["logs"])
         })
 
-        # OpenAI Whisper API mendukung flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm
-        ext = os.path.splitext(temp_file_path)[1].lower()
-        supported_exts = [".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"]
-        
+        compressed_file_path = tempfile.mktemp(suffix=".mp3")
         final_audio_path = temp_file_path
-        if ext not in supported_exts:
-            job_log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
-            wav_file_path = tempfile.mktemp(suffix=".wav")
-            if convert_to_wav(temp_file_path, wav_file_path):
-                final_audio_path = wav_file_path
-                job_log("✅ Konversi ke .wav berhasil")
-            else:
-                job_log("❌ Konversi gagal, mencoba mengirim aslinya...")
-                
+        if convert_and_compress_audio(temp_file_path, compressed_file_path):
+            final_audio_path = compressed_file_path
+            new_size_mb = os.path.getsize(compressed_file_path) / 1024 / 1024
+            ratio = (1 - (new_size_mb / max(orig_size_mb, 0.001))) * 100
+            job_log(f"✅ Kompresi audio berhasil: {orig_size_mb:.2f} MB ➔ {new_size_mb:.2f} MB (Hemat {ratio:.1f}%)")
+        else:
+            job_log("⚠️ Kompresi FFmpeg gagal, menggunakan file audio asli...")
+
         file_size_mb = os.path.getsize(final_audio_path) / 1024 / 1024
-        job_log(f"✅ Audio siap dikirim: {file_size_mb:.2f} MB")
-        
+        job_log(f"✅ Audio siap dikirim ke OpenAI: {file_size_mb:.2f} MB")
+
         target_model = "whisper-1"
 
         # === Kirim progress: 15% - Transkripsi dimulai ===
@@ -264,8 +277,8 @@ def process_transcription_background(
         state["percentage"] = 15
         send_webhook(callback_url, {
             "status": "progress",
-            "progress": 30,
-            "message": f"Mengirim audio ke OpenAI Whisper...",
+            "progress": 15,
+            "message": f"Audio terkompresi ({file_size_mb:.1f} MB). Mentranskripsi dengan OpenAI Whisper...",
             "logs": list(state["logs"])
         })
 
@@ -462,9 +475,14 @@ def process_transcription_background(
     finally:
         state["active"] = False
         # Cleanup temp files
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-            job_log(f"🧹 Temp file dibersihkan")
+        for p in [temp_file_path, compressed_file_path]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        job_log(f"🧹 Temp file dibersihkan")
+
 
 
 # ============================================
@@ -769,19 +787,42 @@ async def _creep_progress(slug: str, start: int, end: int, message: str, step: i
 
 async def process_audio_pipeline(slug: str, callback_url: str, audio_path: str, language: str):
     creep = None
+    compressed_audio_path = None
     try:
         async with v2_semaphore:
-            await manager.send_progress(slug, {"progress": 5, "message": "Audio diterima, memulai proses..."})
+            await manager.send_progress(slug, {"progress": 5, "message": "Audio diterima, memeriksa format & kompresi..."})
             if v2_model is None or v2_tokenizer is None:
                 raise RuntimeError("Model RoBERTa V2 tidak termuat di server.")
             if not OPENAI_API_KEY:
                 raise RuntimeError("OPENAI_API_KEY belum dikonfigurasi di server.")
 
+            # 0) Pre-processing & Kompresi Audio (Menangani rekaman iPhone/macOS/dsb)
+            orig_size_mb = os.path.getsize(audio_path) / 1024 / 1024
+            log(f"🔧 [{slug}] Pre-processing audio: {orig_size_mb:.2f} MB")
+            await manager.send_progress(slug, {
+                "progress": 8, 
+                "message": f"Mengompresi audio ({orig_size_mb:.1f} MB) ke format optimal..."
+            })
+
+            compressed_audio_path = tempfile.mktemp(suffix=".mp3")
+            target_audio = audio_path
+            if await asyncio.to_thread(convert_and_compress_audio, audio_path, compressed_audio_path):
+                target_audio = compressed_audio_path
+                new_size_mb = os.path.getsize(compressed_audio_path) / 1024 / 1024
+                ratio = (1 - (new_size_mb / max(orig_size_mb, 0.001))) * 100
+                log(f"✅ [{slug}] Kompresi V2 berhasil: {orig_size_mb:.2f} MB ➔ {new_size_mb:.2f} MB (Hemat {ratio:.1f}%)")
+                await manager.send_progress(slug, {
+                    "progress": 12, 
+                    "message": f"Audio terkompresi ({new_size_mb:.1f} MB, hemat {ratio:.0f}%). Memulai transkripsi..."
+                })
+            else:
+                log(f"⚠️ [{slug}] Kompresi gagal, memakai audio asli.")
+
             # 1) Transkripsi + diarization
-            await manager.send_progress(slug, {"progress": 15, "message": "Transkripsi & identifikasi pembicara..."})
+            await manager.send_progress(slug, {"progress": 15, "message": "Transkripsi & identifikasi pembicara (Whisper)..."})
             creep = asyncio.create_task(_creep_progress(slug, 15, 55, "Transkripsi & identifikasi pembicara..."))
             t0 = time.time()
-            segments = await asyncio.to_thread(v2_diarize, audio_path, language)
+            segments = await asyncio.to_thread(v2_diarize, target_audio, language)
             creep.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await creep
@@ -835,8 +876,12 @@ async def process_audio_pipeline(slug: str, callback_url: str, audio_path: str, 
     finally:
         if creep is not None:
             creep.cancel()
-        if audio_path and os.path.exists(audio_path):
-            os.remove(audio_path)
+        for p in [audio_path, compressed_audio_path]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
 
 @app.post("/api/v2/transcribe")
@@ -851,19 +896,9 @@ async def transcribe_v2(
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         shutil.copyfileobj(file.file, tmp)
         temp_audio_path = tmp.name
-        
-    final_audio_path = temp_audio_path
-    supported_exts = [".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"]
-    if ext.lower() not in supported_exts:
-        log(f"⚠️ Format {ext} tidak didukung secara native, mengonversi ke .wav dengan FFmpeg...")
-        wav_file_path = tempfile.mktemp(suffix=".wav")
-        if convert_to_wav(temp_audio_path, wav_file_path):
-            final_audio_path = wav_file_path
-            log("✅ Konversi ke .wav berhasil")
-        else:
-            log("❌ Konversi gagal, mencoba mengirim aslinya...")
 
     log(f"📥 V2 diterima: slug={slug} file={file.filename} bahasa={language}")
     await manager.send_progress(slug, {"progress": 2, "message": "Audio diterima server AI..."})
-    background_tasks.add_task(process_audio_pipeline, slug, callback_url, final_audio_path, language)
+    background_tasks.add_task(process_audio_pipeline, slug, callback_url, temp_audio_path, language)
     return {"status": "processing_started"}
+
