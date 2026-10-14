@@ -92,13 +92,16 @@ def send_webhook(callback_url: str, payload: dict, timeout: int = 15):
 def convert_and_compress_audio(input_path: str, output_path: str) -> bool:
     """
     Standarisasi dan kompresi audio ke MP3 16kHz mono bitrate 32k.
-    Menghilangkan header Apple ALAC/AAC yang bermasalah dan memastikan
+    Menghilangkan header Apple ALAC/AAC yang bermasalah, memangkas keheningan kosong
+    di awal rekaman (yang sering memicu halusinasi Whisper), dan memastikan
     ukuran file aman jauh di bawah limit 25MB OpenAI Whisper.
     """
     try:
+        # silenceremove di awal: hapus silence > 0.5 detik di detik ke-0 (threshold -50dB)
         cmd = [
             "ffmpeg", "-y", "-i", input_path,
             "-vn",
+            "-af", "silenceremove=start_periods=1:start_duration=0.5:start_threshold=-50dB",
             "-ar", "16000",
             "-ac", "1",
             "-b:a", "32k",
@@ -108,8 +111,22 @@ def convert_and_compress_audio(input_path: str, output_path: str) -> bool:
         result = subprocess.run(cmd, capture_output=True, check=True, timeout=120)
         return True
     except subprocess.CalledProcessError as e:
-        log(f"❌ FFmpeg kompresi gagal: {e.stderr.decode(errors='ignore')}")
-        return False
+        log(f"⚠️ FFmpeg dengan filter silenceremove gagal, mencoba fallback standar tanpa filter...")
+        try:
+            cmd_fallback = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-vn",
+                "-ar", "16000",
+                "-ac", "1",
+                "-b:a", "32k",
+                "-f", "mp3",
+                output_path
+            ]
+            subprocess.run(cmd_fallback, capture_output=True, check=True, timeout=120)
+            return True
+        except Exception as fb_err:
+            log(f"❌ FFmpeg kompresi fallback gagal: {fb_err}")
+            return False
     except FileNotFoundError:
         log(f"❌ FFmpeg tidak ditemukan di sistem!")
         return False
@@ -292,13 +309,14 @@ def process_transcription_background(
         files = {
             "file": (os.path.basename(final_audio_path), open(final_audio_path, "rb"))
         }
-        lang_name = "Indonesia" if whisper_lang == "id" else ("Inggris" if whisper_lang == "en" else whisper_lang)
+        # Gunakan prompt sebagai vocabulary primer (istilah domain), bukan kalimat instruksi
+        vocab_primer = "Bimbingan skripsi, tesis, disertasi, penelitian, mahasiswa, dosen penguji, metodologi, analisis."
         data = {
             "model": target_model,
             "response_format": "verbose_json",
             "timestamp_granularities[]": "segment",
-            "temperature": "0.1",
-            "prompt": f"Berikut adalah transkripsi rekaman percakapan dan bimbingan dalam bahasa {lang_name}."
+            "temperature": "0.0",
+            "prompt": vocab_primer
         }
         if whisper_lang:
             data["language"] = whisper_lang
@@ -620,13 +638,14 @@ def v2_diarize(audio_path: str, language: str) -> list:
     lang = LANG_MAP.get(language)
 
     def _transcribe(with_lang: bool):
-        lang_name = "Indonesia" if lang == "id" else ("Inggris" if lang == "en" else "Mandarin")
+        # Gunakan prompt sebagai vocabulary primer (istilah domain), bukan kalimat instruksi
+        vocab_primer = "Bimbingan skripsi, tesis, disertasi, penelitian, mahasiswa, dosen penguji, metodologi, analisis."
         data = {
             "model": "whisper-1",
             "response_format": "verbose_json",
             "timestamp_granularities[]": "segment",
-            "temperature": "0.1",
-            "prompt": f"Berikut adalah transkripsi rekaman percakapan dan bimbingan dalam bahasa {lang_name} secara detail dan natural."
+            "temperature": "0.0",
+            "prompt": vocab_primer
         }
         if with_lang and lang:
             data["language"] = lang
