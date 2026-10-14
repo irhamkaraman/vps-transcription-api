@@ -339,14 +339,23 @@ def process_transcription_background(
         segment_count = 0
 
         for segment in segments:
-            esc_text = segment.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            esc_text = segment.get("text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").strip()
             
-            # --- FILTER HALUSINASI (POST-PROCESSOR) ---
+            # --- FILTER HALUSINASI & DUPLIKASI (POST-PROCESSOR) ---
             text_lower = esc_text.lower().strip()
             
-            # 1. Filter kata template YouTube / Halusinasi
+            # 1. Filter teks kosong
+            if not text_lower:
+                continue
+
+            # 2. Filter kata template YouTube / Halusinasi
             if "subscribe" in text_lower or "like" in text_lower or "komen" in text_lower or "share" in text_lower or "terima kasih" in text_lower or "selamat menikmati" in text_lower:
                 continue 
+
+            # 3. Filter Duplikasi Beruntun (Whisper Looping Hallucination):
+            # Jika kalimat sama persis dengan kalimat sebelumnya, abaikan (looping hallucination)
+            if previous_text and (text_lower == previous_text.lower().strip() or (len(text_lower) > 10 and text_lower in previous_text.lower())):
+                continue
 
             previous_text = esc_text
             # ----------------------------------------------------
@@ -643,16 +652,21 @@ def v2_diarize(audio_path: str, language: str) -> list:
     # Karena API Whisper murni tidak mendukung diarization, kita gunakan LLM untuk menebak speaker
     # berdasarkan konteks percakapan akademik (Dosen vs Mahasiswa).
     segments = []
+    prev_v2_text = ""
     for s in raw_segments:
         text = (s.get("text") or "").strip()
         if not text:
             continue
             
-        # --- FILTER HALUSINASI ---
+        # --- FILTER HALUSINASI & DUPLIKASI ---
         text_lower = text.lower()
         if "subscribe" in text_lower or "like" in text_lower or "komen" in text_lower or "share" in text_lower or "terima kasih" in text_lower or "selamat menikmati" in text_lower:
             continue
             
+        if prev_v2_text and (text_lower == prev_v2_text.lower().strip() or (len(text_lower) > 10 and text_lower in prev_v2_text.lower())):
+            continue
+        prev_v2_text = text
+
         segments.append({
             "id": s.get("id", 0),
             "speaker": "UNKNOWN", # Default
